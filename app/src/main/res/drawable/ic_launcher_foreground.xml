@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 喇叭 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,45 h9 l13,-13 v44 l-13,-13 h-9z" />
+    <!-- 声波 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M60,42 A14,14 0 0 1 60,66" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M73,33 A23,23 0 0 1 73,75" />
+    <!-- 平衡标尺 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,80 h36 v3 h-36z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M52,76 h4 v11 h-4z" />
+</vector>

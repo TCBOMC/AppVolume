@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 读取最近使用/正在运行的应用，需要用户在「使用情况访问权限」中手动授予 -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- 挂 AudioEffect 需要它，普通权限，安装即授予 -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- 跑 dumpsys media.audio_flinger 拿音频会话表。signature|privileged|development 级，
+         正常渠道拿不到，靠 Shizuku 执行 `pm grant` 授予一次。 -->
+    <uses-permission
+        android:name="android.permission.DUMP"
+        tools:ignore="ProtectedPermissions" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Android 11+（API 30+）包可见性过滤：不声明这条，getApplicationInfo /
+         getPackagesForUid 对第三方包一律查不到 —— 后果是会话表的 name 列解析失败，
+         正在发声的应用（如 B站）直接从列表里消失。targetSdk 30+ 必须声明。 -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppVolume"
+        tools:targetApi="31">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.AppVolume">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 常驻监控：会话一出现就按配置挂上音效，进程死了音效也就没了，所以必须活着 -->
+        <service
+            android:name=".audio.AudioControlService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Shizuku 拉起的独立进程服务，运行身份是 shell 或 root -->
+        <service
+            android:name=".audio.ShizukuShellService"
+            android:exported="true" />
+
+        <!-- Shizuku v11+ 的授权入口，authorities 必须带包名后缀 -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+    </application>
+
+</manifest>

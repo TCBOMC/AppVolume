@@ -1,0 +1,23 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# SDK 路径是本机配置，不入库
+local.properties
+
+# 签名与密钥
+*.jks
+*.keystore
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Kotlin 编译器报错日志
+.kotlin/
