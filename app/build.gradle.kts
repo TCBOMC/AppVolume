@@ -12,8 +12,8 @@ android {
         applicationId = "com.trseimc.appvolume"
         minSdk = 29
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.4.3"
+        versionCode = 9
+        versionName = "1.5.0"
     }
 
     buildTypes {

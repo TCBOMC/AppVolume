@@ -2,11 +2,13 @@ package com.trseimc.appvolume.ui
 
 import android.app.Application
 import android.content.pm.ApplicationInfo
+import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.trseimc.appvolume.apps.AppEntry
 import com.trseimc.appvolume.apps.AppScanner
 import com.trseimc.appvolume.apps.ProcessScanner
+import com.trseimc.appvolume.overlay.VolumeWatcherService
 import com.trseimc.appvolume.apps.RunState
 import com.trseimc.appvolume.audio.AppVolumeState
 import com.trseimc.appvolume.audio.ApplyResult
@@ -101,6 +103,13 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
     private val _degraded = MutableStateFlow(false)
     val degraded: StateFlow<Boolean> = _degraded
 
+    // 音量键悬浮控制（可选功能）的两个开关
+    private val _accessibilityOn = MutableStateFlow(false)
+    val accessibilityOn: StateFlow<Boolean> = _accessibilityOn
+
+    private val _overlayGranted = MutableStateFlow(false)
+    val overlayGranted: StateFlow<Boolean> = _overlayGranted
+
     /** 进程表是靠借 Shizuku 的 shell 身份读到的（本进程权限被 ROM 拒了）。 */
     private val _processViaShell = MutableStateFlow(false)
     val processViaShell: StateFlow<Boolean> = _processViaShell
@@ -160,6 +169,10 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             if (forceGrant) grantAttempted = false
             _isRefreshing.value = true
+            _accessibilityOn.value = withContext(Dispatchers.Default) {
+                VolumeWatcherService.isEnabled(app)
+            }
+            _overlayGranted.value = Settings.canDrawOverlays(app)
             val usage = usageScanner.hasUsageAccess()
             _hasUsageAccess.value = usage
 

@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">应用音量</string>
+    <string name="accessibility_desc">监听音量键按下，在系统音量条弹出时显示一个悬浮按钮，点开可为正在发声的应用单独调音量。只旁观按键事件，不拦截、不改变系统音量行为。</string>
 </resources>

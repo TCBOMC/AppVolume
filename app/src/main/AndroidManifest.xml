@@ -20,6 +20,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- 音量键悬浮控制：TYPE_APPLICATION_OVERLAY 悬浮窗，用户在设置里手动授予 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <!-- Android 11+（API 30+）包可见性过滤：不声明这条，getApplicationInfo /
          getPackagesForUid 对第三方包一律查不到 —— 后果是会话表的 name 列解析失败，
          正在发声的应用（如 B站）直接从列表里消失。targetSdk 30+ 必须声明。 -->
@@ -57,6 +60,21 @@
         <service
             android:name=".audio.ShizukuShellService"
             android:exported="true" />
+
+        <!-- 音量键监听（无障碍服务）：旁观音量键、观察系统音量面板窗口、
+             管理「悬浮按钮 + 应用音量浮窗」。永远不消费按键事件。 -->
+        <service
+            android:name=".overlay.VolumeWatcherService"
+            android:exported="false"
+            android:label="音量键悬浮控制"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/volume_watcher_config" />
+        </service>
 
         <!-- Shizuku v11+ 的授权入口，authorities 必须带包名后缀 -->
         <provider

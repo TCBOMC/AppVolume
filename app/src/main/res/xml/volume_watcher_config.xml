@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  音量键监听服务配置。
+
+  flagRequestFilterKeyEvents：让 onKeyEvent 能收到音量键。我们在回调里永远返回 false
+  （不消费事件），所以只旁观、不改变系统行为。
+
+  flagRetrieveInteractiveWindows + canRetrieveWindowContent：让 getWindows() 可用，
+  用于观察系统音量面板（SystemUI 的 VolumeDialog）窗口的出现/消失，从而和它
+  一起显示、一起隐藏。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRequestFilterKeyEvents|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_desc" />

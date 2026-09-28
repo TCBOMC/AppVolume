@@ -83,6 +83,8 @@ fun AppListScreen(vm: AppVolumeViewModel) {
     val degraded by vm.degraded.collectAsStateWithLifecycle()
     val sourceDiag by vm.sourceDiag.collectAsStateWithLifecycle()
     val activePackages by vm.activePackages.collectAsStateWithLifecycle()
+    val accessibilityOn by vm.accessibilityOn.collectAsStateWithLifecycle()
+    val overlayGranted by vm.overlayGranted.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -179,6 +181,30 @@ fun AppListScreen(vm: AppVolumeViewModel) {
                         shizukuProbe = shizukuProbe,
                         adbCommands = remember { vm.adbGrantCommands() },
                         onCopy = { copyToClipboard(context, it) }
+                    )
+                }
+            }
+
+            if (!accessibilityOn || !overlayGranted) {
+                item(key = "overlay_perm") {
+                    OverlayPermissionCard(
+                        accessibilityOn = accessibilityOn,
+                        overlayGranted = overlayGranted,
+                        onOpenAccessibility = {
+                            runCatching {
+                                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                            }
+                        },
+                        onOpenOverlay = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        android.net.Uri.parse("package:${context.packageName}")
+                                    )
+                                )
+                            }
+                        }
                     )
                 }
             }
@@ -327,6 +353,51 @@ private fun StatusCard(
             } else if (degraded) {
                 TextButton(onClick = { vm.refresh(forceGrant = true) }) { Text(action) }
             }
+        }
+    }
+}
+
+/**
+ * 音量键悬浮控制（可选功能）的权限引导。
+ * 两个开关：无障碍服务（旁观音量键 + 观察音量面板窗口）、悬浮窗（显示按钮和浮窗）。
+ */
+@Composable
+private fun OverlayPermissionCard(
+    accessibilityOn: Boolean,
+    overlayGranted: Boolean,
+    onOpenAccessibility: () -> Unit,
+    onOpenOverlay: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Text("音量键悬浮控制（可选）", style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = "按音量键时在系统音量条旁弹出一个悬浮按钮，点开可给正在发声的应用单独调音量。" +
+                    "无障碍服务只旁观按键，不拦截、不改变系统音量行为。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (!accessibilityOn) {
+                    Button(onClick = onOpenAccessibility) { Text("① 开无障碍") }
+                }
+                if (!overlayGranted) {
+                    Button(onClick = onOpenOverlay) { Text("② 授予悬浮窗") }
+                }
+            }
+            Text(
+                text = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    "提示：侧载应用的无障碍开关若被灰掉，去系统「应用信息」里点「允许受限设置」。"
+                } else {
+                    ""
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
