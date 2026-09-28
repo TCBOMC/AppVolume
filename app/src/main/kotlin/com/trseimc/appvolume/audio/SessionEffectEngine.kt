@@ -68,6 +68,14 @@ object SessionEffectEngine {
         sessions: List<AudioSessionInfo>
     ): Report = syncInternal(sessions, mapOf(packageName to state), restrictTo = packageName)
 
+    /**
+     * 正在被用户拖动滑条的应用包名。轮询同步会跳过它 —— 既不下发保存值、也不释放
+     * 它的音效句柄，这个包的会话状态完全由界面的实时推送驱动，避免「拖动中每 1.5s
+     * 被旧配置顶回去一次」。拖动结束（松手下发）后置回 null。
+     */
+    @Volatile
+    var suppressedPackage: String? = null
+
     private fun syncInternal(
         sessions: List<AudioSessionInfo>,
         settings: Map<String, AppVolumeState>,
@@ -75,8 +83,10 @@ object SessionEffectEngine {
     ): Report {
         val wanted = HashMap<Int, AppVolumeState>()
         val candidateIds = HashSet<Int>()
+        val suppressed = suppressedPackage
         for (session in sessions) {
             if (session.packageName == SELF_PACKAGE) continue
+            if (suppressed != null && session.packageName == suppressed) continue
             if (restrictTo != null && session.packageName != restrictTo) continue
             candidateIds += session.sessionId
             val state = settings[session.packageName] ?: continue

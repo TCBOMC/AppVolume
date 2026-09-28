@@ -138,7 +138,8 @@ fun VolumeSheet(
                 onValueChange = { value ->
                     dragging = true
                     draft = draft.copy(gainSlider = value)
-                    vm.saveVolume(app, draft)
+                    // 拖动中实时生效：引擎侧幂等且带缓存，中间值会被 conflate 掉
+                    vm.pushLive(app, draft)
                 },
                 onValueChangeFinished = {
                     dragging = false
@@ -170,7 +171,7 @@ fun VolumeSheet(
                 onValueChange = { value ->
                     dragging = true
                     draft = draft.copy(pan = value)
-                    vm.saveVolume(app, draft)
+                    vm.pushLive(app, draft)
                 },
                 onValueChangeFinished = {
                     dragging = false

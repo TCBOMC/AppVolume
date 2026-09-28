@@ -11,16 +11,20 @@ import com.trseimc.appvolume.apps.RunState
 import com.trseimc.appvolume.audio.AppVolumeState
 import com.trseimc.appvolume.audio.ApplyResult
 import com.trseimc.appvolume.audio.EngineCapability
+import com.trseimc.appvolume.audio.SessionEffectEngine
 import com.trseimc.appvolume.audio.SessionRegistry
 import com.trseimc.appvolume.audio.SessionScanner
 import com.trseimc.appvolume.audio.SessionVolumeEngine
 import com.trseimc.appvolume.audio.ShizukuBridge
 import com.trseimc.appvolume.data.VolumeRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -116,6 +120,12 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
     /** DUMP 授权只自动尝试一次，避免前台 8 秒轮询时反复失败刷屏。 */
     private var grantAttempted = false
 
+    // 拖动滑条的实时推送队列：null 初始，Pair 只保最新（conflate）
+    private val livePush = MutableStateFlow<Pair<AppEntry, AppVolumeState>?>(null)
+
+    // 各应用的延迟落盘任务，去抖用；只在 init 的 worker 协程里读写
+    private val pendingSaves = HashMap<String, Job>()
+
     init {
         // 后台服务在扫会话，这里负责把结果反映到列表上
         viewModelScope.launch {
@@ -125,6 +135,24 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
         }
         // 用户在 Shizuku 里点完「允许」后立刻重跑一次，不用等下一个轮询周期
         shizuku.onPermissionResult = { granted -> if (granted) refresh(forceGrant = true) }
+
+        // 拖动滑条的实时下发通道。StateFlow 天然 conflate：拖动产生的中间值会被丢掉，
+        // 只留下最新值交给唯一的 worker 顺序执行 —— 既做到实时生效，又不会堆积协程、
+        // 也不会出现旧值晚到把新值覆盖回去的乱序问题。
+        viewModelScope.launch(Dispatchers.Default) {
+            livePush.filterNotNull().collect { (target, state) ->
+                engine.applyVolume(target, state)
+                // 持久化去抖：拖动期间别每个 tick 都写一次 DataStore，
+                // 停顿 250ms 再落盘。后台服务 1.5s 轮询用的是这份配置，
+                // 拖动中哪怕轮询读到旧值，下一次实时推送也会立刻纠正。
+                pendingSaves.remove(target.packageName)?.cancel()
+                pendingSaves[target.packageName] = viewModelScope.launch {
+                    delay(SAVE_DEBOUNCE_MS)
+                    repository.save(target.packageName, state)
+                }
+            }
+        }
+
         refresh()
     }
 
@@ -357,11 +385,25 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { repository.save(app.packageName, state) }
     }
 
+    /**
+     * 拖动滑条时的实时推送：只走引擎（幂等、有缓存，增益没变就不重写），
+     * 落盘交给 init 里那条去抖 worker。松手后的最终值由 [pushToEngine] 收尾。
+     * 拖动期间轮询同步会跳过这个包，保存值不会把实时值顶回去。
+     */
+    fun pushLive(app: AppEntry, state: AppVolumeState) {
+        SessionEffectEngine.suppressedPackage = app.packageName
+        livePush.value = app to state
+    }
+
     /** 把配置真正推给目标应用。失败原因会原样显示给用户，不做美化。 */
     fun pushToEngine(app: AppEntry, state: AppVolumeState) {
         viewModelScope.launch {
             repository.save(app.packageName, state)
             val result = withContext(Dispatchers.Default) { engine.applyVolume(app, state) }
+            // 拖动结束，把轮询同步的豁免交还。只清自己名下的，别误伤别的拖动
+            if (SessionEffectEngine.suppressedPackage == app.packageName) {
+                SessionEffectEngine.suppressedPackage = null
+            }
             _status.value = when (result) {
                 is ApplyResult.Ok -> result.detail
                 is ApplyResult.Failed -> result.reason
@@ -378,5 +420,8 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
 
         // 「最近打开」一段的窗口：这么近还开着，大概率只是被切到后台、进程没死
         const val RECENT_WINDOW_MS = 30 * 60 * 1000L
+
+        // 拖动期间配置落盘的去抖间隔
+        const val SAVE_DEBOUNCE_MS = 250L
     }
 }
