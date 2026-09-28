@@ -55,8 +55,15 @@ object SessionEffectEngine {
     var attachedCount: Int = 0
         private set
 
-    fun sync(sessions: List<AudioSessionInfo>, settings: Map<String, AppVolumeState>): Report =
-        syncInternal(sessions, settings, restrictTo = null)
+    fun sync(sessions: List<AudioSessionInfo>, settings: Map<String, AppVolumeState>): Report {
+        // 轮询同步的豁免只在这里做：正在被用户拖动滑条的应用由界面的实时推送驱动，
+        // 轮询不下发保存值、也不释放它的句柄。注意豁免绝不能下沉到 syncInternal ——
+        // 实时推送走的 syncPackage 也经过那个函数，下沉后等于把自己也豁免掉，
+        // 拖动期间每一下下发都是空操作（v1.4.2「拖动不实时、松手才生效」的根因）。
+        val suppressed = suppressedPackage
+        val polled = if (suppressed == null) sessions else sessions.filter { it.packageName != suppressed }
+        return syncInternal(polled, settings, restrictTo = null)
+    }
 
     /**
      * 只更新单个应用。和 [sync] 的差别是不会顺手释放别的应用的音效 ——
@@ -83,10 +90,8 @@ object SessionEffectEngine {
     ): Report {
         val wanted = HashMap<Int, AppVolumeState>()
         val candidateIds = HashSet<Int>()
-        val suppressed = suppressedPackage
         for (session in sessions) {
             if (session.packageName == SELF_PACKAGE) continue
-            if (suppressed != null && session.packageName == suppressed) continue
             if (restrictTo != null && session.packageName != restrictTo) continue
             candidateIds += session.sessionId
             val state = settings[session.packageName] ?: continue
