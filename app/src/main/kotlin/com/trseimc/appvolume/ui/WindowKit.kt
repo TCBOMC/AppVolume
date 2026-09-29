@@ -66,7 +66,9 @@ private val WindowCardRadius = 24.dp
 private val WindowCardShape = RoundedCornerShape(WindowCardRadius)
 
 /** 卡片背景：白色半透明，配合背后的模糊形成毛玻璃（透明度只属于卡片本身）。 */
-private val WindowCardBg = Color(0xD9FFFFFF)
+// 应用内浮窗有自绘毛玻璃垫底，透明度更高（alpha 0xB3=70% 不透明）；
+// overlay 面板没有模糊，要更实（OverlayChrome.CARD_BG=0xE6=90%）
+private val WindowCardBg = Color(0xB3FFFFFF)
 
 /** 卡片边框：细深线，把半透明卡片从背后内容里衬出来。 */
 private val WindowCardBorder = Color(0x1F000000)

@@ -507,7 +507,7 @@ class VolumeWatcherService : AccessibilityService() {
         val maxHPx = dm.heightPixels - 2 * marginPx // 高度上限 = 屏幕高 - 上下边距
 
         // 卡片 = 窗口本身，视觉参数与 ui/WindowKit.kt 的应用内浮窗完全一致
-        // （白半透明 0xD9FFFFFF、圆角 24dp）。样式参考荣耀音量面板：
+        // （白半透明 CARD_BG=0xB3FFFFFF、圆角 24dp）。样式参考荣耀音量面板：
         // 顶部居中标题 + 右上角设置按钮，中间一排纵向滑条，底部翻页圆点。
         // 毛玻璃做不了：overlay 悬浮在其他应用上面，拿不到对方像素，
         // 系统 blurBehind 在荣耀上又被强制成全屏模糊，只能纯半透明
@@ -515,7 +515,7 @@ class VolumeWatcherService : AccessibilityService() {
             orientation = LinearLayout.VERTICAL
             background = OverlayChrome.roundedBg(
                 this@VolumeWatcherService,
-                0xD9FFFFFF.toInt(),
+                OverlayChrome.CARD_BG,
                 OverlayChrome.CARD_RADIUS_DP
             )
             setPadding(dp(12), dp(12), dp(12), dp(10))
@@ -537,12 +537,16 @@ class VolumeWatcherService : AccessibilityService() {
                 Gravity.CENTER
             )
         )
-        val gear = TextView(this).apply {
-            text = "⚙"
-            setTextColor(0xE6000000.toInt())
-            textSize = 20f
-            gravity = Gravity.CENTER
+        // 设置按钮：与主页 IconButton 同款 —— Material 齿轮图标 24dp、无背景、
+        // 48dp 触控区（点开应用主页）
+        val gear = FrameLayout(this).apply {
             isClickable = true
+            val icon = ImageView(this@VolumeWatcherService).apply {
+                setImageResource(com.trseimc.appvolume.R.drawable.ic_settings)
+                setColorFilter(0xE6000000.toInt())
+                scaleType = ImageView.ScaleType.FIT_CENTER
+            }
+            addView(icon, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
             setOnClickListener {
                 runCatching {
                     startActivity(
@@ -555,7 +559,7 @@ class VolumeWatcherService : AccessibilityService() {
         }
         titleRow.addView(
             gear,
-            FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER_VERTICAL or Gravity.END)
+            FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER_VERTICAL or Gravity.END)
         )
         card.addView(
             titleRow,

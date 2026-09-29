@@ -26,7 +26,8 @@ object OverlayChrome {
 
     /** 卡片圆角（dp），blurBehind 半径也对齐它。 */
     const val CARD_RADIUS_DP = 24
-    private val CARD_BG = 0xD9FFFFFF.toInt()
+    // 音量键面板没有毛玻璃垫底，背景要比应用内浮窗（0xB3FFFFFF）更实才可读
+    const val CARD_BG = 0xE6FFFFFF.toInt()
     private val CAPSULE_BG = 0xF2FFFFFF.toInt()
     private val CAPSULE_STROKE = 0x1F000000.toInt()
 
