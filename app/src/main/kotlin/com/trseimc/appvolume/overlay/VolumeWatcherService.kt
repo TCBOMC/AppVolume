@@ -103,25 +103,65 @@ class VolumeWatcherService : AccessibilityService() {
 
     private val hideButtonRunnable = Runnable { hideButton("超时") }
 
-    // 面板消失的防抖：荣耀的音量条弹出动画期间，窗口列表偶尔瞬时扫不到它，
-    // 按钮刚加上就被「面板消失」逻辑摘掉，看起来就是从来没弹过。到点时还要复核一次
-    // 面板窗口是否真的不在了，不在才真隐藏。
+    // 面板消失的防抖：到点时再查一次记住的窗口 id 是否真的从列表移除（纯 id 比对，零 IPC），
+    // 真没了才隐藏。音量条弹出/收起动画期间窗口列表偶尔抖动，防抖吸收这种瞬时误判。
     private val delayedHideRunnable = Runnable {
-        if (panelView == null && !panelWindowStillThere()) {
-            hideButton("音量面板消失确认")
-        } else {
-            // 面板其实还在，反悔：恢复同步状态，等它的下一次消失事件
+        if (panelView != null) return@Runnable
+        val stillThere = panelWindowId > 0 &&
+            runCatching { windows }.getOrNull()?.any { it.id == panelWindowId } == true
+        if (stillThere) {
+            // 反悔：面板其实还在，恢复同步状态等它真正的消失
             panelWindowSeen = true
+        } else {
+            Log.i(TAG, "delayedHide: 音量面板窗口确认移除（id=$panelWindowId），隐藏按钮")
+            panelWindowId = -1
+            hideButton("音量面板消失确认")
         }
     }
 
-    /** 同步模式下判断音量面板窗口是否还挂着（见 onAccessibilityEvent 里的判定说明）。 */
-    private fun panelWindowStillThere(): Boolean {
-        val windows = runCatching { windows }.getOrNull() ?: return true // 拿不到列表就不下结论
-        val remembered = panelWindowId > 0 && windows.any { it.id == panelWindowId }
-        // 有窗口此刻解析不出根节点（多半在动画中），不能断定面板没了
-        val indeterminate = windows.any { runCatching { it.root }.getOrNull() == null }
-        return remembered || indeterminate
+    // ---- 冷启动补扫：systemui 窗口事件后短间隔探几次，不等下一个窗口事件 ----
+    // 音量面板弹出动画期间节点经常解析不出来，下一个窗口事件可能来得很晚；
+    // 与其干等，不如在收到 systemui 事件的瞬间按 60/90/120/160/200ms 补扫，
+    // 任一次命中就立即点亮按钮。只在「还没记住音量窗口」时启动，命中即停。
+
+    private val probeRunnable = object : Runnable {
+        override fun run() {
+            if (panelWindowSeen || panelView != null) return
+            val hit = findVolumePanelWindow()
+            if (hit != null) {
+                adoptPanelWindow(hit.id)
+                return
+            }
+            probeIndex++
+            if (probeIndex < PROBE_DELAYS_MS.size) {
+                mainHandler.postDelayed(this, PROBE_DELAYS_MS[probeIndex])
+            }
+        }
+    }
+
+    private var probeIndex = 0
+
+    private fun startProbeBurst() {
+        mainHandler.removeCallbacks(probeRunnable)
+        probeIndex = 0
+        mainHandler.postDelayed(probeRunnable, PROBE_DELAYS_MS[0])
+    }
+
+    private fun cancelProbeBurst() {
+        mainHandler.removeCallbacks(probeRunnable)
+    }
+
+    /** 认领音量面板窗口：记住 id、点亮按钮（同步模式），并撤掉待执行的隐藏。 */
+    private fun adoptPanelWindow(id: Int) {
+        if (id <= 0) return
+        panelMatchCount++
+        val first = !panelWindowSeen
+        panelWindowId = id
+        panelWindowSeen = true
+        lastPanelSeenAtMs = System.currentTimeMillis()
+        mainHandler.removeCallbacks(delayedHideRunnable)
+        if (first) Log.i(TAG, "adoptPanelWindow: 音量面板窗口 id=$id（触发悬浮按钮）")
+        showButton(viaPanel = true)
     }
 
     // 按钮设置：DataStore 流在服务连接时收集进这个快照，showButton/hideButton 直接读
@@ -190,39 +230,55 @@ class VolumeWatcherService : AccessibilityService() {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
         ) return
+        // 自己的按钮/浮窗平移动画逐帧改窗口位置，会刷出大量窗口事件；
+        // 它们与音量面板判定毫无关系，直接短路，否则事件队列被自己堵死，
+        // 音量面板的出现/消失事件就要排队等 —— 表现就是按钮跟着迟钝。
+        if (event.packageName?.toString() == packageName) return
         lastWindowEventAtMs = System.currentTimeMillis()
         snapshotWindowsDiag()
         if (panelView != null) return
 
-        val scanHit = findVolumePanelWindow()
-        val panelVisible = scanHit != null || isVolumePanelEvent(event)
-        when {
-            panelVisible -> {
-                // 音量面板弹出来了。这里同时也是兜底触发点：有些 ROM 不把按键事件
-                // 下发给无障碍服务（onKeyEvent 收不到），但按音量键必然弹出系统音量条，
-                // 窗口事件一定有 —— 靠这个也能把按钮带出来。
-                panelMatchCount++
-                // 记住音量窗口的身份：荣耀的音量条动画期间节点扫不到、类名也可能不含
-                // volume，靠反复类名匹配会误判消失。之后「消失」的唯一判据是
-                // 这个窗口 id 真的从窗口列表里移除。
-                panelWindowId = scanHit?.id ?: event.windowId
-                if (!panelWindowSeen) Log.i(TAG, "onAccessibilityEvent: 检测到音量面板窗口 id=$panelWindowId（触发悬浮按钮）")
-                panelWindowSeen = true
-                lastPanelSeenAtMs = System.currentTimeMillis()
-                mainHandler.removeCallbacks(delayedHideRunnable)
-                showButton(viaPanel = true)
-            }
-            panelWindowSeen -> {
-                if (!panelWindowStillThere()) {
-                    Log.i(TAG, "onAccessibilityEvent: 音量面板窗口消失（id=$panelWindowId），防抖后隐藏")
-                    panelWindowSeen = false
-                    mainHandler.removeCallbacks(hideButtonRunnable)
-                    mainHandler.postDelayed(delayedHideRunnable, PANEL_HIDE_DEBOUNCE_MS)
+        // 快路径：已记住音量窗口 id —— 只做「这个 id 还在窗口列表里吗」的比对。
+        // window.id 是本地元数据，不走节点 IPC，也不再全量遍历/子树扫描。
+        if (panelWindowId > 0) {
+            val stillThere = runCatching { windows }.getOrNull()?.any { it.id == panelWindowId } == true
+            if (stillThere) {
+                if (!panelWindowSeen) {
+                    adoptPanelWindow(panelWindowId)
+                } else {
+                    mainHandler.removeCallbacks(delayedHideRunnable)
+                    if (buttonView == null) showButton(viaPanel = true)
                 }
-                // 面板窗口还挂着（或列表暂时解析不出）：什么都不做，按钮继续跟着
+                return
             }
+            // 记住的 id 没了：窗口可能被重建换了 id，全量扫一次认领；认领不到才算消失
+            val hit = findVolumePanelWindow()
+            if (hit != null) {
+                adoptPanelWindow(hit.id)
+                return
+            }
+            if (panelWindowSeen) {
+                Log.i(TAG, "onAccessibilityEvent: 音量面板窗口移除（id=$panelWindowId），防抖后隐藏")
+                panelWindowSeen = false
+                mainHandler.removeCallbacks(hideButtonRunnable)
+                mainHandler.postDelayed(delayedHideRunnable, PANEL_HIDE_DEBOUNCE_MS)
+            }
+            return
         }
-        // 从没观察到面板窗口的 ROM 上，靠 scheduleHide 的超时兜底
+
+        // 冷路径：还没记住音量窗口 id。
+        // 1) 事件直读零 IPC 命中（事件自带的包名/类名，不走窗口枚举）
+        if (isVolumePanelEvent(event)) {
+            val wid = if (event.windowId > 0) event.windowId else findVolumePanelWindow()?.id ?: -1
+            adoptPanelWindow(wid)
+            return
+        }
+        // 2) systemui 的窗口事件 = 音量条可能在弹出，启动短间隔补扫（最多 ~570ms 内命中）
+        if (event.packageName?.toString()?.contains("systemui", ignoreCase = true) == true) {
+            startProbeBurst()
+        }
+        // 3) 本事件顺手扫一次（保留 838a3e4 的即时性）
+        findVolumePanelWindow()?.let { adoptPanelWindow(it.id) }
     }
 
     /**
@@ -267,46 +323,26 @@ class VolumeWatcherService : AccessibilityService() {
     }
 
     /** 记录当前所有窗口的「包名 | 根类名」，给诊断卡用 —— 面板匹配不上时，这里能直接看到荣耀音量窗口的真实标识。 */
+    private var lastSnapshotAt = 0L
+
     private fun snapshotWindowsDiag() {
+        // 取 root 是每窗口一次 binder IPC；限频 1s，只做诊断不抢主线程。
+        // 注意：这里绝不做子树遍历（getChild 更贵），否则触发事件被拖慢、按钮跟着迟钝。
+        val now = System.currentTimeMillis()
+        if (now - lastSnapshotAt < 1000) return
+        lastSnapshotAt = now
         val list = runCatching { windows }.getOrNull() ?: return
         val snapshot = list.mapNotNull { window ->
             val root = runCatching { window.root }.getOrNull()
                 ?: return@mapNotNull "id=${window.id} | <根节点不可用> | type=${window.type} layer=${window.layer}"
             val pkg = root.packageName?.toString() ?: "<null>"
             val cls = root.className?.toString() ?: "<null>"
-            val base = "$pkg | $cls | type=${window.type} layer=${window.layer} id=${window.id}"
-            // systemui 窗口把子树类名也 dump 出来：荣耀音量条内部的类名长什么样，一看便知
-            if (pkg.contains("systemui", ignoreCase = true)) {
-                val subtree = describeSubtree(root, 0)
-                if (subtree.isNotBlank()) "$base\n    子树: $subtree" else base
-            } else {
-                base
-            }
+            "$pkg | $cls | type=${window.type} layer=${window.layer} id=${window.id}"
         }.sorted().joinToString("\n")
         if (snapshot != windowsDiagSnapshot) {
             windowsDiagSnapshot = snapshot
             Log.d(TAG, "窗口列表变化:\n$snapshot")
         }
-    }
-
-    /** 收集节点子树的类名（限深 3 层、最多 12 个，简单类名），用于诊断窗口内部结构。 */
-    private fun describeSubtree(node: android.view.accessibility.AccessibilityNodeInfo, depth: Int): String {
-        if (depth > 3) return ""
-        val names = ArrayDeque<String>()
-        fun walk(n: android.view.accessibility.AccessibilityNodeInfo, d: Int) {
-            if (names.size >= 12) return
-            n.className?.toString()?.let { full ->
-                names.add(full.substringAfterLast('.'))
-            }
-            if (d < 3) {
-                for (i in 0 until n.childCount) {
-                    val child = runCatching { n.getChild(i) }.getOrNull() ?: continue
-                    walk(child, d + 1)
-                }
-            }
-        }
-        walk(node, depth)
-        return names.joinToString(" / ")
     }
 
     // ---- 悬浮按钮 ----
@@ -341,7 +377,10 @@ class VolumeWatcherService : AccessibilityService() {
                 dp((s.sizeDp * 0.62f).roundToInt()),
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    // 允许内容画出窗口边界：没有它，平移动画里按钮滑出窗口的部分全被
+                    // 裁剪掉 —— 滑入全程隐身，动画播完才在终点突然出现（表现为延迟）
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 // 音量条一般贴着按键一侧垂直居中，按钮放同侧；纵向位置按设置的百分比
@@ -628,6 +667,7 @@ class VolumeWatcherService : AccessibilityService() {
     override fun onDestroy() {
         watchConnected = false
         Log.i(TAG, "onDestroy: 无障碍服务断开")
+        cancelProbeBurst()
         hideButton("服务解绑", animate = false)
         hidePanel()
         serviceScope.cancel()
@@ -637,6 +677,7 @@ class VolumeWatcherService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         watchConnected = false
         Log.i(TAG, "onUnbind: 无障碍服务解绑")
+        cancelProbeBurst()
         hideButton("服务解绑", animate = false)
         hidePanel()
         return super.onUnbind(intent)
@@ -649,8 +690,13 @@ class VolumeWatcherService : AccessibilityService() {
     companion object {
         private const val TAG = "AppVolumeWatch"
 
-        // 面板消失 → 真隐藏按钮的防抖时长
-        private const val PANEL_HIDE_DEBOUNCE_MS = 600L
+        // 面板消失 → 真隐藏按钮的防抖时长。防抖到点有「窗口 id 还在吗」复核兜底，
+        // 防抖本身不承担防误判职责，取短保持「跟着音量条消失」的跟手度
+        private const val PANEL_HIDE_DEBOUNCE_MS = 150L
+
+        // 冷启动补扫的间隔序列（毫秒）：systemui 窗口事件后按此节奏探几次音量窗口，
+        // 覆盖弹出动画期（节点解析不出的时段），命中即停
+        private val PROBE_DELAYS_MS = longArrayOf(60L, 90L, 120L, 160L, 200L)
 
         // 供主界面诊断的运行状态。无障碍服务由系统直接绑定、主界面拿不到实例，
         // 同进程静态字段是最省事的观测口：诊断卡能看出「开关开了但服务没连上」
