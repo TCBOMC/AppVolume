@@ -58,6 +58,10 @@ object OverlayChrome {
             textSize = if (sizeDp >= 40) 14f else 12f
         }
         return FrameLayout(context).apply {
+            // 容器最小尺寸 = sizeDp：WRAP_CONTENT 只会包住 ✕ 文本，之前漏了这
+            // 两行导致胶囊缩成一个字符大（应用内 Compose 版有 defaultMinSize 所以正常）
+            minimumWidth = dp(context, sizeDp)
+            minimumHeight = dp(context, sizeDp)
             background = roundedBg(context, CAPSULE_BG, sizeDp / 2).apply {
                 setStroke(dp(context, 1), CAPSULE_STROKE)
             }

@@ -13,6 +13,7 @@ import com.trseimc.appvolume.audio.AudioControlService
 import com.trseimc.appvolume.ui.AppListScreen
 import com.trseimc.appvolume.ui.AppVolumeViewModel
 import com.trseimc.appvolume.ui.theme.AppVolumeTheme
+import com.trseimc.appvolume.util.FileLog
 
 class MainActivity : ComponentActivity() {
 
@@ -21,6 +22,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 日志/闪退记录最先初始化（幂等），后面的异常都能落盘
+        FileLog.init(this)
+        FileLog.log("lifecycle", "MainActivity onCreate")
         enableEdgeToEdge()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

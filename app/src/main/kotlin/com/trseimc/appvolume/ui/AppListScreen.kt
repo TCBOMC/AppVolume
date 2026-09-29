@@ -37,6 +37,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -66,6 +67,7 @@ import com.trseimc.appvolume.data.ButtonPosition
 import com.trseimc.appvolume.data.ButtonSettings
 import com.trseimc.appvolume.data.ButtonSide
 import com.trseimc.appvolume.audio.ShizukuBridge
+import com.trseimc.appvolume.util.FileLog
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -419,6 +421,48 @@ private fun ButtonSettingsSheet(
                 valueRange = 24f..96f,
                 steps = 35
             )
+
+            // 日志记录（排查闪退用）：运行日志写入文件，闪退堆栈无条件落盘；
+            // 闪退后重新打开 app，在这里复制日志
+            val ctx = LocalContext.current
+            var loggingOn by remember { mutableStateOf(FileLog.enabled) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("日志记录", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "运行日志+闪退堆栈写入文件，闪退后可复制",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = loggingOn,
+                    onCheckedChange = {
+                        FileLog.setEnabled(it)
+                        loggingOn = it
+                    }
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistChip(
+                    onClick = {
+                        val ok = FileLog.copyToClipboard(ctx)
+                        Toast.makeText(
+                            ctx,
+                            if (ok) "日志已复制到剪贴板" else "复制失败（日志未初始化？）",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    label = { Text("复制日志") }
+                )
+                AssistChip(
+                    onClick = {
+                        FileLog.clear()
+                        Toast.makeText(ctx, "日志已清除", Toast.LENGTH_SHORT).show()
+                    },
+                    label = { Text("清除日志") }
+                )
+            }
         }
     }
 }

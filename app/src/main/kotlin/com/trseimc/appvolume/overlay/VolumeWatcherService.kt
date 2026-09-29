@@ -12,15 +12,19 @@ import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import androidx.viewpager2.widget.ViewPager2
+import com.trseimc.appvolume.MainActivity
 import com.trseimc.appvolume.audio.AppVolumeState
 import com.trseimc.appvolume.audio.AudioCurve
 import com.trseimc.appvolume.audio.SessionEffectEngine
@@ -34,6 +38,7 @@ import com.trseimc.appvolume.data.ButtonSettings
 import com.trseimc.appvolume.data.ButtonSettingsStore
 import com.trseimc.appvolume.data.ButtonSide
 import com.trseimc.appvolume.data.VolumeRepository
+import com.trseimc.appvolume.util.FileLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -87,8 +92,11 @@ class VolumeWatcherService : AccessibilityService() {
     // 悬浮按钮 / 浮窗的窗口句柄
     private var buttonView: View? = null
     private var panelView: View? = null
-    private var rowsContainer: LinearLayout? = null
-    private var panelTitle: TextView? = null
+    private var panelPager: ViewPager2? = null
+    private var panelDots: LinearLayout? = null
+    private var panelEmptyText: TextView? = null
+    private var panelAdapter: PanelPagerAdapter? = null
+    private var panelPages: List<List<String>> = emptyList()
 
     // 最近一次音量键按下 / 窗口事件 / 音量面板窗口出现的时刻（墙钟，供主界面诊断显示）
     // 见 companion 里的静态字段 —— 无障碍服务由系统绑定，主界面没法拿它的实例
@@ -197,6 +205,9 @@ class VolumeWatcherService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        // 服务进程可能比 MainActivity 先起（开机自启/重启后），这里兜底初始化（幂等）
+        FileLog.init(this)
+        FileLog.log("watcher", "onServiceConnected")
         watchConnected = true
         Log.i(TAG, "onServiceConnected: 无障碍服务已连接")
         serviceScope.launch {
@@ -478,61 +489,126 @@ class VolumeWatcherService : AccessibilityService() {
 
     private fun showPanel() {
         if (!Settings.canDrawOverlays(this)) return
+        FileLog.log("panel", "showPanel 开始")
         hideButton("打开浮窗") // 打开浮窗后按钮使命完成；音量键继续照常调系统音量
 
         panelView?.let {
             runCatching { windowManager.removeView(it) }
             panelView = null
         }
-        rowsContainer = null
-        panelTitle = null
+        panelPager = null
+        panelDots = null
+        panelEmptyText = null
+        panelAdapter = null
 
         val dm = resources.displayMetrics
         val marginPx = dp(OverlayChrome.MARGIN_DP)
         val widthPx = minOf(dm.widthPixels - 2 * marginPx, dp(OverlayChrome.MAX_WIDTH_DP))
         val maxHPx = dm.heightPixels - 2 * marginPx // 高度上限 = 屏幕高 - 上下边距
 
-        // 卡片 = 窗口本身：顶行（信息 + 关闭胶囊，都在卡片内）+ 滚动正文（无标题胶囊）
+        // 卡片 = 窗口本身，视觉参数与 ui/WindowKit.kt 的应用内浮窗完全一致
+        // （白半透明 0xD9FFFFFF、圆角 24dp）。样式参考荣耀音量面板：
+        // 顶部居中标题 + 右上角设置按钮，中间一排纵向滑条，底部翻页圆点。
+        // 毛玻璃做不了：overlay 悬浮在其他应用上面，拿不到对方像素，
+        // 系统 blurBehind 在荣耀上又被强制成全屏模糊，只能纯半透明
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = OverlayChrome.roundedBg(
                 this@VolumeWatcherService,
                 0xD9FFFFFF.toInt(),
-                24
+                OverlayChrome.CARD_RADIUS_DP
             )
-            setPadding(dp(16), dp(10), dp(16), dp(14))
+            setPadding(dp(12), dp(12), dp(12), dp(10))
         }
 
-        val topRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        // 标题行：居中标题 + 右上角设置按钮（点开应用主页）
+        val titleRow = FrameLayout(this)
+        val title = TextView(this).apply {
+            text = "音量调节"
+            setTextColor(0xE6000000.toInt())
+            textSize = 17f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
-        val info = TextView(this).apply {
-            setTextColor(0x99000000.toInt())
-            textSize = 12f
-            setPadding(dp(2), 0, dp(2), 0)
-        }
-        panelTitle = info
-        topRow.addView(
-            info,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        titleRow.addView(
+            title,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            )
         )
-        topRow.addView(OverlayChrome.closeCapsule(this, 32) { hidePanel() })
+        val gear = TextView(this).apply {
+            text = "⚙"
+            setTextColor(0xE6000000.toInt())
+            textSize = 20f
+            gravity = Gravity.CENTER
+            isClickable = true
+            setOnClickListener {
+                runCatching {
+                    startActivity(
+                        Intent(this@VolumeWatcherService, MainActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }
+                hidePanel()
+            }
+        }
+        titleRow.addView(
+            gear,
+            FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER_VERTICAL or Gravity.END)
+        )
         card.addView(
-            topRow,
+            titleRow,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
-        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        rowsContainer = rows
-        val scroll = ScrollView(this).apply { addView(rows) }
+        // 纵向滑条翻页区（ViewPager2 不支持 wrap_content，钉固定高度）
+        val pager = ViewPager2(this).apply {
+            adapter = PanelPagerAdapter().also { panelAdapter = it }
+            registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+                override fun onPageSelected(position: Int) {
+                    FileLog.log("panel", "onPageSelected=$position")
+                    // 适配器里页序是反的（第一页在最右），换算回真实页号
+                    updateDots(panelPages.size, panelPages.size - 1 - position)
+                }
+            })
+        }
+        panelPager = pager
         card.addView(
-            scroll,
+            pager,
             LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(240)
+            ).also { it.topMargin = dp(8) }
+        )
+
+        // 翻页圆点（第一页在最右）
+        val dots = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        panelDots = dots
+        card.addView(
+            dots,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { it.topMargin = dp(10) }
+        )
+
+        // 空态文本
+        val empty = TextView(this).apply {
+            text = "现在没有应用在发声。播放音乐或视频后再按一次音量键。"
+            setTextColor(0x99000000.toInt())
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(24), dp(8), dp(24))
+        }
+        panelEmptyText = empty
+        card.addView(
+            empty,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -541,7 +617,8 @@ class VolumeWatcherService : AccessibilityService() {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             // 不做任何变暗：半透明和模糊效果只属于卡片矩形，窗口外内容原样可见
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.CENTER
@@ -550,21 +627,36 @@ class VolumeWatcherService : AccessibilityService() {
             // 拿不到对方的像素，自绘模糊不可行，只能纯半透明
         }
 
-        // 先量自然高度：超出上限就把窗口钉在上限上（正文区开始滚动）
+        // 点空白处（窗口外）关闭
+        card.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_OUTSIDE) {
+                hidePanel()
+                true
+            } else {
+                false
+            }
+        }
+
+        // 先量自然高度：超出上限就把窗口钉在上限上
         card.measure(
             View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         )
         lp.height = card.measuredHeight.coerceAtMost(maxHPx)
+        FileLog.log("panel", "measure 完：宽=$widthPx 高=${card.measuredHeight} 最终窗口高=${lp.height}（上限 $maxHPx）")
 
         rebuildRows()
         runCatching {
             windowManager.addView(card, lp)
             panelView = card
+            FileLog.log("panel", "addView 成功")
         }.onFailure {
+            FileLog.log("panel", "addView 失败", it)
             panelView = null
-            rowsContainer = null
-            panelTitle = null
+            panelPager = null
+            panelDots = null
+            panelEmptyText = null
+            panelAdapter = null
         }
     }
 
@@ -590,117 +682,163 @@ class VolumeWatcherService : AccessibilityService() {
             runCatching { windowManager.removeView(it) }
             panelView = null
         }
-        rowsContainer = null
-        panelTitle = null
+        panelPager = null
+        panelDots = null
+        panelEmptyText = null
+        panelAdapter = null
         draggingPkg = null
     }
 
-    /** 按 SessionRegistry 当前的发声应用重建浮窗行。 */
+    /** 按 SessionRegistry 当前的发声应用重建滑条翻页。 */
     private fun rebuildRows() {
-        val rows = rowsContainer ?: return
-        val title = panelTitle ?: return
+        val pager = panelPager ?: return
+        val adapter = panelAdapter ?: return
+        val dots = panelDots ?: return
+        val empty = panelEmptyText ?: return
         val sessions = SessionRegistry.sessions.value
             .filter { it.packageName != packageName }
             .groupBy { it.packageName }
 
         mainHandler.post {
-            title.text = "正在发声 · ${sessions.size} 个应用"
-            rows.removeAllViews()
-            if (sessions.isEmpty()) {
-                rows.addView(TextView(this).apply {
-                    text = "现在没有应用在发声。播放音乐或视频后再按一次音量键。"
-                    setTextColor(0x99000000.toInt())
-                    textSize = 13f
-                    setPadding(0, dp(12), 0, dp(4))
-                })
+            val pkgs = sessions.keys.toList()
+            panelPages = pkgs.chunked(PAGE_SIZE)
+            FileLog.log("panel", "rebuildRows：应用数=${pkgs.size} 页数=${panelPages.size}")
+            if (panelPages.isEmpty()) {
+                pager.visibility = View.GONE
+                dots.visibility = View.GONE
+                empty.visibility = View.VISIBLE
+                resizePanel()
                 return@post
             }
-            for ((pkg, _) in sessions) {
-                buildAppRow(pkg)?.let { rows.addView(it) }
-            }
+            empty.visibility = View.GONE
+            pager.visibility = View.VISIBLE
+            dots.visibility = View.VISIBLE
+            // 页序反过来放：第一页显示在最右，其它页在左（对齐荣耀面板）
+            adapter.pages = panelPages.reversed()
+            adapter.notifyDataSetChanged()
+            FileLog.log("panel", "notifyDataSetChanged 后 setCurrentItem=${adapter.itemCount - 1}")
+            pager.setCurrentItem(adapter.itemCount - 1, false)
+            updateDots(panelPages.size, 0)
             resizePanel()
         }
     }
 
-    /** 一行：图标 + 应用名 + dB 读数 + 滑条。返回 null 表示包已卸载、画不了。 */
-    private fun buildAppRow(pkg: String): View? {
+    /** 翻页圆点：page 0 的点在最右，active 的点高亮。 */
+    private fun updateDots(pageCount: Int, activePage: Int) {
+        val dots = panelDots ?: return
+        dots.removeAllViews()
+        if (pageCount <= 1) return
+        for (page in pageCount - 1 downTo 0) {
+            val dot = View(this).apply {
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.OVAL
+                    setColor(if (page == activePage) 0xFF7CB8FF.toInt() else 0x33000000)
+                }
+            }
+            dots.addView(
+                dot,
+                LinearLayout.LayoutParams(dp(8), dp(8)).also { p ->
+                    p.marginStart = dp(5)
+                    p.marginEnd = dp(5)
+                }
+            )
+        }
+    }
+
+    /** 一页中的一列：纵向滑条（底部应用图标）+ 应用名。返回 null 表示包已卸载、画不了。 */
+    private fun buildSliderColumn(pkg: String): View? {
         val pm = packageManager
         val info = runCatching { pm.getApplicationInfo(pkg, 0) }.getOrNull() ?: return null
         val label = runCatching { pm.getApplicationLabel(info).toString() }.getOrDefault(pkg)
         val state = configs[pkg] ?: AppVolumeState.DEFAULT
+        FileLog.log("panel", "buildSliderColumn：$pkg value=${state.gainSlider}")
 
-        val row = LinearLayout(this).apply {
+        val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(10), 0, dp(2))
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(6), dp(8), dp(6), 0)
         }
 
-        val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        val icon = ImageView(this)
-        icon.setImageDrawable(runCatching { pm.getApplicationIcon(pkg) }.getOrNull())
-        icon.scaleType = ImageView.ScaleType.FIT_CENTER
-        header.addView(icon, LinearLayout.LayoutParams(dp(30), dp(30)))
+        val slider = VolumeSliderView(this).apply {
+            value = state.gainSlider
+            icon = runCatching { pm.getApplicationIcon(pkg) }.getOrNull()
+            onStartDrag = {
+                draggingPkg = pkg
+                // 和主界面同一个套路：拖动期间轮询同步豁免，别拿旧保存值顶回实时值
+                SessionEffectEngine.suppressedPackage = pkg
+            }
+            onValueChange = { v, final ->
+                val merged = AppVolumeState(
+                    gainSlider = v,
+                    pan = configs[pkg]?.pan ?: 0f
+                )
+                configs[pkg] = merged
+                livePush.value = LivePush(pkg, merged, final = final)
+                if (final) draggingPkg = null
+            }
+        }
+        col.addView(
+            slider,
+            LinearLayout.LayoutParams(dp(52), dp(190))
+        )
 
         val name = TextView(this).apply {
             text = label
             setTextColor(0xE6000000.toInt())
-            textSize = 14f
+            textSize = 12f
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = Gravity.CENTER
         }
-        header.addView(
+        col.addView(
             name,
-            LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)
-                .also { params -> params.marginStart = dp(10) }
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { p -> p.topMargin = dp(8) }
         )
-
-        val dbLabel = TextView(this).apply {
-            text = AudioCurve.formatDb(state.gainDb)
-            setTextColor(0x99000000.toInt())
-            textSize = 12f
-        }
-        header.addView(dbLabel)
-        row.addView(header)
-
-        val seek = SeekBar(this).apply {
-            max = 100
-            progress = (state.gainSlider * 100).roundToInt()
-            thumbTintList = android.content.res.ColorStateList.valueOf(0xFF7CB8FF.toInt())
-            progressTintList = android.content.res.ColorStateList.valueOf(0xFF7CB8FF.toInt())
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
-                    if (!fromUser) return
-                    val merged = AppVolumeState(
-                        gainSlider = value / 100f,
-                        pan = configs[pkg]?.pan ?: 0f
-                    )
-                    configs[pkg] = merged
-                    dbLabel.text = AudioCurve.formatDb(merged.gainDb)
-                    livePush.value = LivePush(pkg, merged, final = false)
-                }
-
-                override fun onStartTrackingTouch(bar: SeekBar) {
-                    draggingPkg = pkg
-                    // 和主界面同一个套路：拖动期间轮询同步豁免，别拿旧保存值顶回实时值
-                    SessionEffectEngine.suppressedPackage = pkg
-                }
-
-                override fun onStopTrackingTouch(bar: SeekBar) {
-                    draggingPkg = null
-                    val merged = AppVolumeState(
-                        gainSlider = bar.progress / 100f,
-                        pan = configs[pkg]?.pan ?: 0f
-                    )
-                    livePush.value = LivePush(pkg, merged, final = true)
-                }
-            })
-        }
-        row.addView(
-            seek,
-            LinearLayout.LayoutParams(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT)
-                .also { params -> params.topMargin = dp(2) }
-        )
-        return row
+        return col
     }
+
+    /** 音量面板的翻页适配器：一页最多 5 个应用的纵向滑条。 */
+    private inner class PanelPagerAdapter :
+        androidx.recyclerview.widget.RecyclerView.Adapter<PageViewHolder>() {
+
+        var pages: List<List<String>> = emptyList()
+
+        override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): PageViewHolder {
+            FileLog.log("panel", "onCreateViewHolder")
+            val row = LinearLayout(this@VolumeWatcherService).apply {
+                orientation = LinearLayout.HORIZONTAL
+                // ViewPager2 强制页视图必须 match_parent（默认给的是 wrap_content，
+                // 布局阶段直接抛 "Pages must fill the whole ViewPager2" 闪退）
+                layoutParams = android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            return PageViewHolder(row)
+        }
+
+        override fun getItemCount(): Int = pages.size
+
+        override fun onBindViewHolder(holder: PageViewHolder, position: Int) {
+            val row = holder.row
+            row.removeAllViews()
+            for (pkg in pages[position]) {
+                buildSliderColumn(pkg)?.let { col ->
+                    row.addView(
+                        col,
+                        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                    )
+                }
+            }
+        }
+    }
+
+    /** 翻页的页 ViewHolder（inner class 里不能嵌套非 inner class，放外层）。 */
+    private class PageViewHolder(val row: LinearLayout) :
+        androidx.recyclerview.widget.RecyclerView.ViewHolder(row)
 
     /** 下发 + 落盘 + 收尾豁免，单 worker 串行执行。 */
     private suspend fun applyAndSave(push: LivePush) {
@@ -750,6 +888,9 @@ class VolumeWatcherService : AccessibilityService() {
 
     companion object {
         private const val TAG = "AppVolumeWatch"
+
+        /** 音量面板一页最多几个应用，超出的横向翻页。 */
+        private const val PAGE_SIZE = 5
 
         // 面板消失 → 真隐藏按钮的防抖时长。防抖到点有「窗口 id 还在吗」复核兜底，
         // 防抖本身不承担防误判职责，取短保持「跟着音量条消失」的跟手度

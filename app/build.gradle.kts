@@ -65,6 +65,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    // 音量面板的横向翻页
+    implementation("androidx.viewpager2:viewpager2:1.1.0")
+    // viewpager2 传递的 fragment 版本太旧触发 lint fatal，显式升级
+    implementation("androidx.fragment:fragment-ktx:1.8.5")
 
     // Shizuku：拿到 shell 级权限，用于精确识别正在发声的应用
     implementation("dev.rikka.shizuku:api:13.1.5")
