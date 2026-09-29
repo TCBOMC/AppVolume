@@ -29,6 +29,10 @@ import com.trseimc.appvolume.audio.SessionRegistry
 import com.trseimc.appvolume.audio.SessionVolumeEngine
 import com.trseimc.appvolume.apps.AppEntry
 import com.trseimc.appvolume.apps.RunState
+import com.trseimc.appvolume.data.ButtonAnimStyle
+import com.trseimc.appvolume.data.ButtonSettings
+import com.trseimc.appvolume.data.ButtonSettingsStore
+import com.trseimc.appvolume.data.ButtonSide
 import com.trseimc.appvolume.data.VolumeRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -97,14 +101,47 @@ class VolumeWatcherService : AccessibilityService() {
     @Volatile
     private var draggingPkg: String? = null
 
-    private val hideButtonRunnable = Runnable { hideButton() }
+    private val hideButtonRunnable = Runnable { hideButton("超时") }
 
     // 面板消失的防抖：荣耀的音量条弹出动画期间，窗口列表偶尔瞬时扫不到它，
-    // 按钮刚加上就被「面板消失」逻辑摘掉，看起来就是从来没弹过。持续 PANEL_HIDE_DEBOUNCE_MS
-    // 都没再见到面板才真隐藏。
+    // 按钮刚加上就被「面板消失」逻辑摘掉，看起来就是从来没弹过。到点时还要复核一次
+    // 面板窗口是否真的不在了，不在才真隐藏。
     private val delayedHideRunnable = Runnable {
-        if (panelView == null) hideButton()
+        if (panelView == null && !panelWindowStillThere()) {
+            hideButton("音量面板消失确认")
+        } else {
+            // 面板其实还在，反悔：恢复同步状态，等它的下一次消失事件
+            panelWindowSeen = true
+        }
     }
+
+    /** 同步模式下判断音量面板窗口是否还挂着（见 onAccessibilityEvent 里的判定说明）。 */
+    private fun panelWindowStillThere(): Boolean {
+        val windows = runCatching { windows }.getOrNull() ?: return true // 拿不到列表就不下结论
+        val remembered = panelWindowId > 0 && windows.any { it.id == panelWindowId }
+        // 有窗口此刻解析不出根节点（多半在动画中），不能断定面板没了
+        val indeterminate = windows.any { runCatching { it.root }.getOrNull() == null }
+        return remembered || indeterminate
+    }
+
+    // 按钮设置：DataStore 流在服务连接时收集进这个快照，showButton/hideButton 直接读
+    private val buttonStore by lazy { ButtonSettingsStore(this) }
+
+    @Volatile
+    private var buttonSettings = ButtonSettings()
+
+    // 消失语义：TIMEOUT = 按键通道，超时自动隐藏；SYNC = 窗口扫描通道，与音量条同步出没
+    private enum class HideMode { TIMEOUT, SYNC }
+
+    @Volatile
+    private var hideMode = HideMode.TIMEOUT
+
+    // 正在播放退场动画的按钮视图；期间再次显示时先收掉它，避免叠两个窗口
+    private var pendingOut: View? = null
+
+    // 当前同步跟随的音量面板窗口 id：命中时记下，消失判定只认「这个窗口从列表里移除」
+    @Volatile
+    private var panelWindowId = -1
 
     private data class LivePush(val pkg: String, val state: AppVolumeState, val final: Boolean)
 
@@ -112,6 +149,9 @@ class VolumeWatcherService : AccessibilityService() {
         super.onServiceConnected()
         watchConnected = true
         Log.i(TAG, "onServiceConnected: 无障碍服务已连接")
+        serviceScope.launch {
+            buttonStore.settings.collect { buttonSettings = it }
+        }
         serviceScope.launch {
             repository.all.collect { all ->
                 configs.clear()
@@ -137,7 +177,7 @@ class VolumeWatcherService : AccessibilityService() {
         ) {
             lastKeyEventAtMs = System.currentTimeMillis()
             Log.i(TAG, "onKeyEvent: 收到音量键 keyCode=${event.keyCode}")
-            if (panelView == null) showButton()
+            if (panelView == null) showButton(viaPanel = false)
         }
         // 永远不消费：系统音量照变、面板照弹
         return false
@@ -154,24 +194,32 @@ class VolumeWatcherService : AccessibilityService() {
         snapshotWindowsDiag()
         if (panelView != null) return
 
-        val panelVisible = isVolumePanelEvent(event) || findVolumePanelWindow() != null
+        val scanHit = findVolumePanelWindow()
+        val panelVisible = scanHit != null || isVolumePanelEvent(event)
         when {
             panelVisible -> {
                 // 音量面板弹出来了。这里同时也是兜底触发点：有些 ROM 不把按键事件
                 // 下发给无障碍服务（onKeyEvent 收不到），但按音量键必然弹出系统音量条，
                 // 窗口事件一定有 —— 靠这个也能把按钮带出来。
                 panelMatchCount++
-                if (!panelWindowSeen) Log.i(TAG, "onAccessibilityEvent: 检测到音量面板窗口（触发悬浮按钮）")
+                // 记住音量窗口的身份：荣耀的音量条动画期间节点扫不到、类名也可能不含
+                // volume，靠反复类名匹配会误判消失。之后「消失」的唯一判据是
+                // 这个窗口 id 真的从窗口列表里移除。
+                panelWindowId = scanHit?.id ?: event.windowId
+                if (!panelWindowSeen) Log.i(TAG, "onAccessibilityEvent: 检测到音量面板窗口 id=$panelWindowId（触发悬浮按钮）")
                 panelWindowSeen = true
                 lastPanelSeenAtMs = System.currentTimeMillis()
                 mainHandler.removeCallbacks(delayedHideRunnable)
-                showButton()
+                showButton(viaPanel = true)
             }
             panelWindowSeen -> {
-                Log.i(TAG, "onAccessibilityEvent: 音量面板窗口消失，防抖后隐藏按钮")
-                panelWindowSeen = false
-                mainHandler.removeCallbacks(hideButtonRunnable)
-                mainHandler.postDelayed(delayedHideRunnable, PANEL_HIDE_DEBOUNCE_MS)
+                if (!panelWindowStillThere()) {
+                    Log.i(TAG, "onAccessibilityEvent: 音量面板窗口消失（id=$panelWindowId），防抖后隐藏")
+                    panelWindowSeen = false
+                    mainHandler.removeCallbacks(hideButtonRunnable)
+                    mainHandler.postDelayed(delayedHideRunnable, PANEL_HIDE_DEBOUNCE_MS)
+                }
+                // 面板窗口还挂着（或列表暂时解析不出）：什么都不做，按钮继续跟着
             }
         }
         // 从没观察到面板窗口的 ROM 上，靠 scheduleHide 的超时兜底
@@ -222,10 +270,18 @@ class VolumeWatcherService : AccessibilityService() {
     private fun snapshotWindowsDiag() {
         val list = runCatching { windows }.getOrNull() ?: return
         val snapshot = list.mapNotNull { window ->
-            val root = runCatching { window.root }.getOrNull() ?: return@mapNotNull null
+            val root = runCatching { window.root }.getOrNull()
+                ?: return@mapNotNull "id=${window.id} | <根节点不可用> | type=${window.type} layer=${window.layer}"
             val pkg = root.packageName?.toString() ?: "<null>"
             val cls = root.className?.toString() ?: "<null>"
-            "$pkg | $cls | type=${window.type} layer=${window.layer}"
+            val base = "$pkg | $cls | type=${window.type} layer=${window.layer} id=${window.id}"
+            // systemui 窗口把子树类名也 dump 出来：荣耀音量条内部的类名长什么样，一看便知
+            if (pkg.contains("systemui", ignoreCase = true)) {
+                val subtree = describeSubtree(root, 0)
+                if (subtree.isNotBlank()) "$base\n    子树: $subtree" else base
+            } else {
+                base
+            }
         }.sorted().joinToString("\n")
         if (snapshot != windowsDiagSnapshot) {
             windowsDiagSnapshot = snapshot
@@ -233,60 +289,128 @@ class VolumeWatcherService : AccessibilityService() {
         }
     }
 
+    /** 收集节点子树的类名（限深 3 层、最多 12 个，简单类名），用于诊断窗口内部结构。 */
+    private fun describeSubtree(node: android.view.accessibility.AccessibilityNodeInfo, depth: Int): String {
+        if (depth > 3) return ""
+        val names = ArrayDeque<String>()
+        fun walk(n: android.view.accessibility.AccessibilityNodeInfo, d: Int) {
+            if (names.size >= 12) return
+            n.className?.toString()?.let { full ->
+                names.add(full.substringAfterLast('.'))
+            }
+            if (d < 3) {
+                for (i in 0 until n.childCount) {
+                    val child = runCatching { n.getChild(i) }.getOrNull() ?: continue
+                    walk(child, d + 1)
+                }
+            }
+        }
+        walk(node, depth)
+        return names.joinToString(" / ")
+    }
+
     // ---- 悬浮按钮 ----
 
-    private fun showButton() {
+    /**
+     * 显示悬浮按钮。
+     *
+     * viaPanel=false（按键通道）：超时自动隐藏，时长用设置里的「消失时间」（默认 2s）。
+     * viaPanel=true（窗口扫描通道）：与音量条窗口同步出没，不按时间隐藏。
+     * 按键先弹、面板随后出现时，会从 TIMEOUT 切到 SYNC 并取消超时。
+     */
+    private fun showButton(viaPanel: Boolean) {
         showButtonCalls++
         if (!Settings.canDrawOverlays(this)) {
             Log.w(TAG, "showButton: 悬浮窗权限（SYSTEM_ALERT_WINDOW）没授予，按钮弹不出来")
             return
         }
+        // 上一次退场动画还没播完又要点亮：直接收掉旧视图，别叠两个窗口
+        pendingOut?.let { stale ->
+            stale.animate().cancel()
+            runCatching { windowManager.removeView(stale) }
+            pendingOut = null
+        }
 
         if (buttonView == null) {
-            val view = TextView(this).apply {
-                text = "🔊"
-                textSize = 20f
-                gravity = Gravity.CENTER
-                setTextColor(Color.WHITE)
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(BUTTON_BG)
-                }
+            val s = buttonSettings
+            val view = VolumeButtonView(this, s.sizeDp, resources.displayMetrics.density).apply {
                 setOnClickListener { showPanel() }
             }
             val lp = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
+                dp(s.sizeDp),
+                dp((s.sizeDp * 0.62f).roundToInt()),
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                // 音量面板一般在按键一侧垂直居中，按钮放同侧但偏下，跟着它一起出没
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                // 音量条一般贴着按键一侧垂直居中，按钮放同侧；纵向位置按设置的百分比
+                gravity = (if (s.side == ButtonSide.RIGHT) Gravity.END else Gravity.START) or
+                    Gravity.CENTER_VERTICAL
                 x = dp(12)
-                y = dp(140)
+                y = ((s.verticalPercent - 50) / 100f * resources.displayMetrics.heightPixels).toInt()
             }
             runCatching {
                 windowManager.addView(view, lp)
                 buttonView = view
                 buttonShowing = true
                 addWindowOk++
-                Log.i(TAG, "showButton: 悬浮按钮已显示")
+                playEnterAnimation(view, s)
+                Log.i(TAG, "showButton: 悬浮按钮已显示（viaPanel=$viaPanel）")
             }.onFailure {
                 addWindowFail++
                 lastAddError = it.message ?: it.javaClass.simpleName
                 Log.w(TAG, "showButton: 加窗失败", it)
             }
         }
-        scheduleHide()
+
+        if (viaPanel) {
+            // 与音量条同步出没：不按时间隐藏
+            hideMode = HideMode.SYNC
+            mainHandler.removeCallbacks(hideButtonRunnable)
+        } else {
+            hideMode = HideMode.TIMEOUT
+            scheduleHide()
+        }
     }
 
-    private fun hideButton() {
-        buttonView?.let {
-            runCatching { windowManager.removeView(it) }
+    private fun playEnterAnimation(view: View, s: ButtonSettings) {
+        when (s.animStyle) {
+            ButtonAnimStyle.SLIDE -> {
+                val direction = if (s.side == ButtonSide.RIGHT) 1f else -1f
+                // 出发点在屏幕外（视图宽 + 边距），平移到落点
+                view.translationX = direction * (dp(s.sizeDp) + dp(12))
+                view.animate().translationX(0f).setDuration(s.animDurationMs.toLong()).start()
+            }
+            ButtonAnimStyle.FADE -> {
+                view.alpha = 0f
+                view.animate().alpha(1f).setDuration(s.animDurationMs.toLong()).start()
+            }
+        }
+    }
+
+    private fun hideButton(reason: String, animate: Boolean = true) {
+        lastHideReason = reason
+        buttonView?.let { view ->
             buttonView = null
             buttonShowing = false
+            val s = buttonSettings
+            if (animate && s.animDurationMs > 0) {
+                pendingOut = view
+                val animator = when (s.animStyle) {
+                    ButtonAnimStyle.SLIDE -> {
+                        val direction = if (s.side == ButtonSide.RIGHT) 1f else -1f
+                        view.animate().translationX(direction * (dp(s.sizeDp) + dp(12)))
+                    }
+                    ButtonAnimStyle.FADE -> view.animate().alpha(0f)
+                }
+                animator.setDuration(s.animDurationMs.toLong()).withEndAction {
+                    pendingOut = null
+                    runCatching { windowManager.removeView(view) }
+                }
+            } else {
+                runCatching { windowManager.removeView(view) }
+            }
         }
         mainHandler.removeCallbacks(hideButtonRunnable)
         mainHandler.removeCallbacks(delayedHideRunnable)
@@ -294,14 +418,14 @@ class VolumeWatcherService : AccessibilityService() {
 
     private fun scheduleHide() {
         mainHandler.removeCallbacks(hideButtonRunnable)
-        mainHandler.postDelayed(hideButtonRunnable, BUTTON_AUTO_HIDE_MS)
+        mainHandler.postDelayed(hideButtonRunnable, buttonSettings.hideTimeoutMs.toLong())
     }
 
     // ---- 浮窗 ----
 
     private fun showPanel() {
         if (!Settings.canDrawOverlays(this)) return
-        hideButton() // 打开浮窗后按钮使命完成；音量键继续照常调系统音量
+        hideButton("打开浮窗") // 打开浮窗后按钮使命完成；音量键继续照常调系统音量
 
         panelView?.let {
             runCatching { windowManager.removeView(it) }
@@ -504,7 +628,7 @@ class VolumeWatcherService : AccessibilityService() {
     override fun onDestroy() {
         watchConnected = false
         Log.i(TAG, "onDestroy: 无障碍服务断开")
-        hideButton()
+        hideButton("服务解绑", animate = false)
         hidePanel()
         serviceScope.cancel()
         super.onDestroy()
@@ -513,7 +637,7 @@ class VolumeWatcherService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         watchConnected = false
         Log.i(TAG, "onUnbind: 无障碍服务解绑")
-        hideButton()
+        hideButton("服务解绑", animate = false)
         hidePanel()
         return super.onUnbind(intent)
     }
@@ -524,7 +648,6 @@ class VolumeWatcherService : AccessibilityService() {
 
     companion object {
         private const val TAG = "AppVolumeWatch"
-        private const val BUTTON_AUTO_HIDE_MS = 3500L
 
         // 面板消失 → 真隐藏按钮的防抖时长
         private const val PANEL_HIDE_DEBOUNCE_MS = 600L
@@ -579,7 +702,11 @@ class VolumeWatcherService : AccessibilityService() {
         var buttonShowing = false
             private set
 
-        private val BUTTON_BG = 0xE6303030.toInt()
+        /** 最近一次按钮隐藏的原因（超时 / 音量面板消失确认 / 打开浮窗 / 服务解绑）。 */
+        @Volatile
+        var lastHideReason = ""
+            private set
+
         private val PANEL_BG = 0xF2202020.toInt()
 
         /** 主界面检查无障碍服务是否已开启。设置里存的是「包/类」或「包/短类名」两种形态。 */

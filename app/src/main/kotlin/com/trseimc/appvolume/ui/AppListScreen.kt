@@ -24,21 +24,26 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,8 +62,12 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.trseimc.appvolume.apps.AppEntry
 import com.trseimc.appvolume.audio.AppVolumeState
 import com.trseimc.appvolume.audio.AudioCurve
+import com.trseimc.appvolume.data.ButtonAnimStyle
+import com.trseimc.appvolume.data.ButtonSettings
+import com.trseimc.appvolume.data.ButtonSide
 import com.trseimc.appvolume.audio.ShizukuBridge
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 // 停留在前台时的列表刷新间隔
 private const val FOREGROUND_REFRESH_INTERVAL_MS = 8_000L
@@ -86,6 +95,7 @@ fun AppListScreen(vm: AppVolumeViewModel) {
     val accessibilityOn by vm.accessibilityOn.collectAsStateWithLifecycle()
     val overlayGranted by vm.overlayGranted.collectAsStateWithLifecycle()
     val watcherConnected by vm.watcherConnected.collectAsStateWithLifecycle()
+    val buttonSettings by vm.buttonSettings.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -109,6 +119,7 @@ fun AppListScreen(vm: AppVolumeViewModel) {
     }
 
     var selectedApp by remember { mutableStateOf<AppEntry?>(null) }
+    var showSettings by remember { mutableStateOf(false) }
 
     // 权限诊断默认收起 —— 之前它平铺在列表上方，内容一多就把整屏占满，
     // LazyColumn 拿不到剩余高度，列表完全滚不出来。现在所有内容都在同一个 LazyColumn 里，
@@ -142,6 +153,9 @@ fun AppListScreen(vm: AppVolumeViewModel) {
                 actions = {
                     TextButton(onClick = { vm.setIncludeSystem(!includeSystem) }) {
                         Text(if (includeSystem) "含系统组件" else "仅第三方")
+                    }
+                    IconButton(onClick = { showSettings = true }) {
+                        Icon(Icons.Default.Settings, contentDescription = "悬浮按钮设置")
                     }
                     IconButton(onClick = vm::refresh) {
                         Icon(Icons.Default.Refresh, contentDescription = "刷新列表")
@@ -294,6 +308,129 @@ fun AppListScreen(vm: AppVolumeViewModel) {
             vm = vm,
             onDismiss = { selectedApp = null }
         )
+    }
+
+    if (showSettings) {
+        ButtonSettingsSheet(
+            settings = buttonSettings,
+            onUpdate = vm::updateButtonSettings,
+            onDismiss = { showSettings = false }
+        )
+    }
+}
+
+/**
+ * 悬浮按钮设置浮窗：消失时间、动画样式、动画时长、位置、大小。
+ * 滑条拖动中只更新本地值，松手才写盘 —— 别让一次拖动打出几十次 DataStore 写入。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ButtonSettingsSheet(
+    settings: ButtonSettings,
+    onUpdate: ((ButtonSettings) -> ButtonSettings) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text("悬浮按钮设置", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "按键触发：超时自动消失；随音量条触发：与音量条同步出没，不按时间。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            SettingLabel("消失时间", "${"%.1f".format(settings.hideTimeoutMs / 1000f)} 秒")
+            var timeout by remember(settings.hideTimeoutMs) { mutableStateOf(settings.hideTimeoutMs.toFloat()) }
+            Slider(
+                value = timeout,
+                onValueChange = { timeout = it },
+                onValueChangeFinished = {
+                    onUpdate { s -> s.copy(hideTimeoutMs = ((timeout / 500).roundToInt().coerceIn(1, 20)) * 500) }
+                },
+                valueRange = 500f..10000f
+            )
+
+            SettingLabel("动画样式")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = settings.animStyle == ButtonAnimStyle.SLIDE,
+                    onClick = { onUpdate { it.copy(animStyle = ButtonAnimStyle.SLIDE) } },
+                    label = { Text("平移") }
+                )
+                FilterChip(
+                    selected = settings.animStyle == ButtonAnimStyle.FADE,
+                    onClick = { onUpdate { it.copy(animStyle = ButtonAnimStyle.FADE) } },
+                    label = { Text("渐显/渐隐") }
+                )
+            }
+
+            SettingLabel("动画时长", "${settings.animDurationMs} ms")
+            var animMs by remember(settings.animDurationMs) { mutableStateOf(settings.animDurationMs.toFloat()) }
+            Slider(
+                value = animMs,
+                onValueChange = { animMs = it },
+                onValueChangeFinished = {
+                    onUpdate { s -> s.copy(animDurationMs = ((animMs / 50).roundToInt().coerceIn(2, 12)) * 50) }
+                },
+                valueRange = 100f..600f
+            )
+
+            SettingLabel("位置")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = settings.side == ButtonSide.LEFT,
+                    onClick = { onUpdate { it.copy(side = ButtonSide.LEFT) } },
+                    label = { Text("左侧") }
+                )
+                FilterChip(
+                    selected = settings.side == ButtonSide.RIGHT,
+                    onClick = { onUpdate { it.copy(side = ButtonSide.RIGHT) } },
+                    label = { Text("右侧") }
+                )
+            }
+            SettingLabel("纵向位置", "${settings.verticalPercent}%（0 顶 / 100 底）")
+            var vertical by remember(settings.verticalPercent) { mutableStateOf(settings.verticalPercent.toFloat()) }
+            Slider(
+                value = vertical,
+                onValueChange = { vertical = it },
+                onValueChangeFinished = {
+                    onUpdate { s -> s.copy(verticalPercent = (vertical / 5).roundToInt().coerceIn(2, 18) * 5) }
+                },
+                valueRange = 10f..90f
+            )
+
+            SettingLabel("大小", "${settings.sizeDp} dp")
+            var size by remember(settings.sizeDp) { mutableStateOf(settings.sizeDp.toFloat()) }
+            Slider(
+                value = size,
+                onValueChange = { size = it },
+                onValueChangeFinished = {
+                    onUpdate { s -> s.copy(sizeDp = (size / 4).roundToInt().coerceIn(12, 32) * 4) }
+                },
+                valueRange = 48f..128f
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingLabel(text: String, value: String? = null) {
+    Row(modifier = Modifier.padding(top = 12.dp)) {
+        Text(text, style = MaterialTheme.typography.titleSmall)
+        value?.let {
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                it,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
     }
 }
 

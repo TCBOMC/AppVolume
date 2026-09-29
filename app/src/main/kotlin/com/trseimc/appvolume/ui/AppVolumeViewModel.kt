@@ -18,6 +18,8 @@ import com.trseimc.appvolume.audio.SessionRegistry
 import com.trseimc.appvolume.audio.SessionScanner
 import com.trseimc.appvolume.audio.SessionVolumeEngine
 import com.trseimc.appvolume.audio.ShizukuBridge
+import com.trseimc.appvolume.data.ButtonSettings
+import com.trseimc.appvolume.data.ButtonSettingsStore
 import com.trseimc.appvolume.data.VolumeRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -113,6 +115,15 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
     // 无障碍服务的实际连接状态：开关开了但被 ROM 受限设置拦住时，这里是 false
     private val _watcherConnected = MutableStateFlow(false)
     val watcherConnected: StateFlow<Boolean> = _watcherConnected
+
+    // 悬浮按钮的外观/行为设置（消失时间、动画、位置、大小），主页设置浮窗读写的就是它
+    private val buttonStore = ButtonSettingsStore(application)
+    val buttonSettings: StateFlow<ButtonSettings> = buttonStore.settings
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ButtonSettings())
+
+    fun updateButtonSettings(transform: (ButtonSettings) -> ButtonSettings) {
+        viewModelScope.launch { buttonStore.update(transform) }
+    }
 
     /** 进程表是靠借 Shizuku 的 shell 身份读到的（本进程权限被 ROM 拒了）。 */
     private val _processViaShell = MutableStateFlow(false)
@@ -354,6 +365,9 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
             append("\n· 加窗 成功 ").append(addWindowOk).append(" / 失败 ").append(addWindowFail)
             if (lastAddError.isNotBlank()) append("（最近错误：").append(lastAddError).append("）")
             append("\n· 按钮当前 ").append(if (buttonShowing) "显示中" else "未显示")
+            if (VolumeWatcherService.lastHideReason.isNotBlank()) {
+                append(" · 上次隐藏原因 ").append(VolumeWatcherService.lastHideReason)
+            }
         }
         // 荣耀的音量面板窗口标识可能和原生不同，匹配不上时这段快照就是定位依据
         VolumeWatcherService.windowsDiagSnapshot.takeIf { it.isNotBlank() }?.let { snapshot ->
