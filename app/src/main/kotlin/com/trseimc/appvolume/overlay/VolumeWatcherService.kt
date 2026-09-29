@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -544,6 +545,9 @@ class VolumeWatcherService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.CENTER
+            // 注意：不用 FLAG_BLUR_BEHIND——荣耀新系统会把 blurBehind 强制扩成全屏
+            // 模糊（实测），其他应用的窗口也一样。overlay 面板悬浮在其他应用上面，
+            // 拿不到对方的像素，自绘模糊不可行，只能纯半透明
         }
 
         // 先量自然高度：超出上限就把窗口钉在上限上（正文区开始滚动）

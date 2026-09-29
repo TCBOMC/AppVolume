@@ -24,7 +24,8 @@ object OverlayChrome {
     /** 窗口最大宽度（dp），横屏/宽屏时不拉满。 */
     const val MAX_WIDTH_DP = 460
 
-    private const val CARD_RADIUS_DP = 24
+    /** 卡片圆角（dp），blurBehind 半径也对齐它。 */
+    const val CARD_RADIUS_DP = 24
     private val CARD_BG = 0xD9FFFFFF.toInt()
     private val CAPSULE_BG = 0xF2FFFFFF.toInt()
     private val CAPSULE_STROKE = 0x1F000000.toInt()

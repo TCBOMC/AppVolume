@@ -2,15 +2,19 @@ package com.trseimc.appvolume.ui
 
 import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.app.Activity
+import android.os.Build
 import android.view.MotionEvent
 import android.view.WindowManager
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -31,9 +35,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -44,6 +51,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.drawToBitmap
 
 /** 卡片与屏幕边缘的最小间距，上下=左右。 */
 private val WindowMargin = 20.dp
@@ -51,8 +59,11 @@ private val WindowMargin = 20.dp
 /** 卡片最大宽度：竖屏窄屏时左右留边自然生效，横屏/宽屏时也不会拉满。 */
 private val WindowMaxWidth = 460.dp
 
-/** 卡片圆角。 */
-private val WindowCardShape = RoundedCornerShape(24.dp)
+/** 卡片圆角，blurBehind 半径也对齐它。 */
+private val WindowCardRadius = 24.dp
+
+/** 卡片圆角形状。 */
+private val WindowCardShape = RoundedCornerShape(WindowCardRadius)
 
 /** 卡片背景：白色半透明，配合背后的模糊形成毛玻璃（透明度只属于卡片本身）。 */
 private val WindowCardBg = Color(0xD9FFFFFF)
@@ -131,6 +142,9 @@ fun FloatingWindow(
                 clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
                 setDimAmount(0f)
                 addFlags(WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH)
+                // 注意：不用 FLAG_BLUR_BEHIND——荣耀新系统会把 blurBehind 强制扩成
+                // 全屏模糊（实测，其他应用同样中招）。毛玻璃改由自绘实现：
+                // 抓 Activity 内容快照自己模糊垫在卡片底层
                 decorView.setOnTouchListener { _, event ->
                     if (event.action == MotionEvent.ACTION_OUTSIDE) {
                         onDismiss()
@@ -170,42 +184,76 @@ fun FloatingWindow(
                 safeTopDp.value - safeBottomDp.value
             ).coerceAtLeast(0f).dp
 
+        // 毛玻璃背景：抓宿主 Activity 的内容快照，缩小 + Compose blur 自绘。
+        // 不依赖系统 blurBehind（荣耀新系统会强制全屏模糊）。API 31 以下
+        // Compose blur 是 no-op，直接不放快照，卡片退化为纯半透明
+        val backdrop = remember(activity) {
+            val decor = activity?.window?.decorView
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                return@remember null
+            }
+            runCatching {
+                if (decor == null || decor.width <= 0 || decor.height <= 0) return@remember null
+                val full = decor.drawToBitmap()
+                val small = Bitmap.createScaledBitmap(
+                    full, (full.width / 6).coerceAtLeast(1), (full.height / 6).coerceAtLeast(1), true
+                )
+                small.asImageBitmap()
+            }.getOrNull()
+        }
+
         MaterialTheme(colorScheme = lightColorScheme()) {
-            Column(
+            Box(
                 modifier = Modifier
                     .widthIn(max = maxCardWidth)
                     .heightIn(max = maxCardHeight)
                     .clip(WindowCardShape)
-                    .background(WindowCardBg)
                     .border(1.dp, WindowCardBorder, WindowCardShape)
             ) {
-                // 顶行：左上角标题胶囊（可选）+ 右上角关闭胶囊，都在卡片内部
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 12.dp, end = 12.dp, top = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (titleContent != null) {
-                        WindowCapsule {
-                            titleContent()
+                // 底层：自绘毛玻璃。整屏快照按中心裁切铺满卡片，重度模糊下
+                // 与实际背景的错位不可见
+                if (backdrop != null) {
+                    Image(
+                        bitmap = backdrop,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .matchParentSize()
+                            .blur(24.dp)
+                    )
+                }
+                // 白色半透明白雾叠层（毛玻璃的"雾"），快照缺失时就是纯半透明卡片
+                Box(modifier = Modifier.matchParentSize().background(WindowCardBg))
+
+                Column {
+                    // 顶行：左上角标题胶囊（可选）+ 右上角关闭胶囊，都在卡片内部
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 12.dp, end = 12.dp, top = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (titleContent != null) {
+                            WindowCapsule {
+                                titleContent()
+                            }
+                        }
+                        Spacer(modifier = Modifier.weight(1f))
+                        WindowCapsule(onClick = onDismiss) {
+                            Text("✕", color = Color(0xE6000000))
                         }
                     }
-                    Spacer(modifier = Modifier.weight(1f))
-                    WindowCapsule(onClick = onDismiss) {
-                        Text("✕", color = Color(0xE6000000))
-                    }
-                }
 
-                // 滚动主画布：正文放这里；fill=false 内容不满时按内容高，超上限才滚动
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f, fill = false)
-                        .verticalScroll(rememberScrollState())
-                        .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp)
-                ) {
-                    content()
+                    // 滚动主画布：正文放这里；fill=false 内容不满时按内容高，超上限才滚动
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                            .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp)
+                    ) {
+                        content()
+                    }
                 }
             }
         }
