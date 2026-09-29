@@ -9,8 +9,8 @@ import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -86,9 +86,8 @@ class VolumeWatcherService : AccessibilityService() {
     private var rowsContainer: LinearLayout? = null
     private var panelTitle: TextView? = null
 
-    // 最近一次音量键按下的时刻（elapsedRealtime），用于把窗口变化和按键关联起来
-    @Volatile
-    private var lastKeyAt = 0L
+    // 最近一次音量键按下 / 窗口事件 / 音量面板窗口出现的时刻（墙钟，供主界面诊断显示）
+    // 见 companion 里的静态字段 —— 无障碍服务由系统绑定，主界面没法拿它的实例
 
     // 已经确认过「系统音量面板窗口」出现，之后它消失就跟着隐藏
     @Volatile
@@ -100,10 +99,19 @@ class VolumeWatcherService : AccessibilityService() {
 
     private val hideButtonRunnable = Runnable { hideButton() }
 
+    // 面板消失的防抖：荣耀的音量条弹出动画期间，窗口列表偶尔瞬时扫不到它，
+    // 按钮刚加上就被「面板消失」逻辑摘掉，看起来就是从来没弹过。持续 PANEL_HIDE_DEBOUNCE_MS
+    // 都没再见到面板才真隐藏。
+    private val delayedHideRunnable = Runnable {
+        if (panelView == null) hideButton()
+    }
+
     private data class LivePush(val pkg: String, val state: AppVolumeState, val final: Boolean)
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        watchConnected = true
+        Log.i(TAG, "onServiceConnected: 无障碍服务已连接")
         serviceScope.launch {
             repository.all.collect { all ->
                 configs.clear()
@@ -127,7 +135,8 @@ class VolumeWatcherService : AccessibilityService() {
         if (event.action == KeyEvent.ACTION_DOWN &&
             (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
         ) {
-            lastKeyAt = SystemClock.elapsedRealtime()
+            lastKeyEventAtMs = System.currentTimeMillis()
+            Log.i(TAG, "onKeyEvent: 收到音量键 keyCode=${event.keyCode}")
             if (panelView == null) showButton()
         }
         // 永远不消费：系统音量照变、面板照弹
@@ -141,38 +150,97 @@ class VolumeWatcherService : AccessibilityService() {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
         ) return
-        if (buttonView == null || panelView != null) return
+        lastWindowEventAtMs = System.currentTimeMillis()
+        snapshotWindowsDiag()
+        if (panelView != null) return
 
-        val panelVisible = findVolumePanelWindow() != null
-        if (panelVisible) {
-            // 音量面板确实弹出来了（和按键关联上了），接下来它消失我们就跟着消失
-            panelWindowSeen = true
-        } else if (panelWindowSeen) {
-            panelWindowSeen = false
-            hideButton()
+        val panelVisible = isVolumePanelEvent(event) || findVolumePanelWindow() != null
+        when {
+            panelVisible -> {
+                // 音量面板弹出来了。这里同时也是兜底触发点：有些 ROM 不把按键事件
+                // 下发给无障碍服务（onKeyEvent 收不到），但按音量键必然弹出系统音量条，
+                // 窗口事件一定有 —— 靠这个也能把按钮带出来。
+                panelMatchCount++
+                if (!panelWindowSeen) Log.i(TAG, "onAccessibilityEvent: 检测到音量面板窗口（触发悬浮按钮）")
+                panelWindowSeen = true
+                lastPanelSeenAtMs = System.currentTimeMillis()
+                mainHandler.removeCallbacks(delayedHideRunnable)
+                showButton()
+            }
+            panelWindowSeen -> {
+                Log.i(TAG, "onAccessibilityEvent: 音量面板窗口消失，防抖后隐藏按钮")
+                panelWindowSeen = false
+                mainHandler.removeCallbacks(hideButtonRunnable)
+                mainHandler.postDelayed(delayedHideRunnable, PANEL_HIDE_DEBOUNCE_MS)
+            }
         }
         // 从没观察到面板窗口的 ROM 上，靠 scheduleHide 的超时兜底
     }
 
-    /** 在窗口列表里找 SystemUI 的音量面板。判定依据：包名 systemui + 根节点类名含 volume。 */
+    /**
+     * 从事件本身判断是不是音量面板：TYPE_WINDOW_STATE_CHANGED 的 packageName /
+     * className 是系统直接填的，不依赖 getWindows 的窗口枚举，是第三条独立信号。
+     */
+    private fun isVolumePanelEvent(event: AccessibilityEvent): Boolean {
+        val pkg = event.packageName?.toString() ?: return false
+        if (!pkg.contains("systemui", ignoreCase = true)) return false
+        val cls = event.className?.toString() ?: return false
+        return cls.contains("volume", ignoreCase = true)
+    }
+
+    /**
+     * 在窗口列表里找 SystemUI 的音量面板。
+     *
+     * 荣耀/华为实测（2026-09-29）：包名不一定是 com.android.systemui、根类名也不一定
+     * 含 volume —— 原来的严格匹配（== 且根节点）从未命中过。放宽为：包名**包含**
+     * systemui，且根节点以下 5 层内任何节点的类名含 volume。
+     */
     private fun findVolumePanelWindow(): AccessibilityWindowInfo? {
         val list = runCatching { windows }.getOrNull() ?: return null
         for (window in list) {
             val root = runCatching { window.root }.getOrNull() ?: continue
             // 包名要从根节点拿 —— AccessibilityWindowInfo 没有包名接口（API 36 实测）
             val pkg = root.packageName?.toString() ?: continue
-            if (pkg != VOLUME_PANEL_PACKAGE) continue
-            val className = root.className?.toString() ?: continue
-            if (className.contains("volume", ignoreCase = true)) return window
+            if (!pkg.contains("systemui", ignoreCase = true)) continue
+            if (subtreeLooksLikeVolume(root, 0)) return window
         }
         return null
+    }
+
+    /** 限深 5 层的子树扫描：任何节点的类名含 volume 即命中。 */
+    private fun subtreeLooksLikeVolume(node: android.view.accessibility.AccessibilityNodeInfo, depth: Int): Boolean {
+        if (depth > 5) return false
+        if (node.className?.toString()?.contains("volume", ignoreCase = true) == true) return true
+        for (i in 0 until node.childCount) {
+            val child = runCatching { node.getChild(i) }.getOrNull() ?: continue
+            if (subtreeLooksLikeVolume(child, depth + 1)) return true
+        }
+        return false
+    }
+
+    /** 记录当前所有窗口的「包名 | 根类名」，给诊断卡用 —— 面板匹配不上时，这里能直接看到荣耀音量窗口的真实标识。 */
+    private fun snapshotWindowsDiag() {
+        val list = runCatching { windows }.getOrNull() ?: return
+        val snapshot = list.mapNotNull { window ->
+            val root = runCatching { window.root }.getOrNull() ?: return@mapNotNull null
+            val pkg = root.packageName?.toString() ?: "<null>"
+            val cls = root.className?.toString() ?: "<null>"
+            "$pkg | $cls | type=${window.type} layer=${window.layer}"
+        }.sorted().joinToString("\n")
+        if (snapshot != windowsDiagSnapshot) {
+            windowsDiagSnapshot = snapshot
+            Log.d(TAG, "窗口列表变化:\n$snapshot")
+        }
     }
 
     // ---- 悬浮按钮 ----
 
     private fun showButton() {
-        if (!Settings.canDrawOverlays(this)) return
-        panelWindowSeen = false
+        showButtonCalls++
+        if (!Settings.canDrawOverlays(this)) {
+            Log.w(TAG, "showButton: 悬浮窗权限（SYSTEM_ALERT_WINDOW）没授予，按钮弹不出来")
+            return
+        }
 
         if (buttonView == null) {
             val view = TextView(this).apply {
@@ -202,6 +270,13 @@ class VolumeWatcherService : AccessibilityService() {
             runCatching {
                 windowManager.addView(view, lp)
                 buttonView = view
+                buttonShowing = true
+                addWindowOk++
+                Log.i(TAG, "showButton: 悬浮按钮已显示")
+            }.onFailure {
+                addWindowFail++
+                lastAddError = it.message ?: it.javaClass.simpleName
+                Log.w(TAG, "showButton: 加窗失败", it)
             }
         }
         scheduleHide()
@@ -211,8 +286,10 @@ class VolumeWatcherService : AccessibilityService() {
         buttonView?.let {
             runCatching { windowManager.removeView(it) }
             buttonView = null
+            buttonShowing = false
         }
         mainHandler.removeCallbacks(hideButtonRunnable)
+        mainHandler.removeCallbacks(delayedHideRunnable)
     }
 
     private fun scheduleHide() {
@@ -425,6 +502,8 @@ class VolumeWatcherService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        watchConnected = false
+        Log.i(TAG, "onDestroy: 无障碍服务断开")
         hideButton()
         hidePanel()
         serviceScope.cancel()
@@ -432,6 +511,8 @@ class VolumeWatcherService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        watchConnected = false
+        Log.i(TAG, "onUnbind: 无障碍服务解绑")
         hideButton()
         hidePanel()
         return super.onUnbind(intent)
@@ -442,8 +523,61 @@ class VolumeWatcherService : AccessibilityService() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     companion object {
-        private const val VOLUME_PANEL_PACKAGE = "com.android.systemui"
+        private const val TAG = "AppVolumeWatch"
         private const val BUTTON_AUTO_HIDE_MS = 3500L
+
+        // 面板消失 → 真隐藏按钮的防抖时长
+        private const val PANEL_HIDE_DEBOUNCE_MS = 600L
+
+        // 供主界面诊断的运行状态。无障碍服务由系统直接绑定、主界面拿不到实例，
+        // 同进程静态字段是最省事的观测口：诊断卡能看出「开关开了但服务没连上」
+        // （侧载应用被荣耀这类 ROM 的受限设置拦住时就是这个表现）。
+        @Volatile
+        var watchConnected = false
+            private set
+
+        @Volatile
+        var lastKeyEventAtMs = 0L
+            private set
+
+        @Volatile
+        var lastWindowEventAtMs = 0L
+            private set
+
+        @Volatile
+        var lastPanelSeenAtMs = 0L
+            private set
+
+        /** 最近一次窗口事件时全部窗口的「包名 | 根类名 | type | layer」快照，面板匹配不上时靠它定位。 */
+        @Volatile
+        var windowsDiagSnapshot = ""
+            private set
+
+        // 按钮弹不弹得出来的全过程观测：面板命中几次、showButton 调几次、加窗成没成、
+        // 失败原因是什么、此刻按钮是否还在。荣耀上「检测到了但按钮没出现」时，这组数字直接定位。
+        @Volatile
+        var panelMatchCount = 0
+            private set
+
+        @Volatile
+        var showButtonCalls = 0
+            private set
+
+        @Volatile
+        var addWindowOk = 0
+            private set
+
+        @Volatile
+        var addWindowFail = 0
+            private set
+
+        @Volatile
+        var lastAddError = ""
+            private set
+
+        @Volatile
+        var buttonShowing = false
+            private set
 
         private val BUTTON_BG = 0xE6303030.toInt()
         private val PANEL_BG = 0xF2202020.toInt()

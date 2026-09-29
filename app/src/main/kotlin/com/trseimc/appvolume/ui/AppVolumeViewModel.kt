@@ -110,6 +110,10 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
     private val _overlayGranted = MutableStateFlow(false)
     val overlayGranted: StateFlow<Boolean> = _overlayGranted
 
+    // 无障碍服务的实际连接状态：开关开了但被 ROM 受限设置拦住时，这里是 false
+    private val _watcherConnected = MutableStateFlow(false)
+    val watcherConnected: StateFlow<Boolean> = _watcherConnected
+
     /** 进程表是靠借 Shizuku 的 shell 身份读到的（本进程权限被 ROM 拒了）。 */
     private val _processViaShell = MutableStateFlow(false)
     val processViaShell: StateFlow<Boolean> = _processViaShell
@@ -173,6 +177,7 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
                 VolumeWatcherService.isEnabled(app)
             }
             _overlayGranted.value = Settings.canDrawOverlays(app)
+            _watcherConnected.value = VolumeWatcherService.watchConnected
             val usage = usageScanner.hasUsageAccess()
             _hasUsageAccess.value = usage
 
@@ -335,6 +340,33 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
         append("· appop ").append(if (usage) "已允许" else "未允许")
             .append("，窗口内 ").append(usageCount).append(" 个应用")
         append("，「最近打开」一段收了 ").append(recentCount).append(" 个")
+        // 音量键悬浮控制：按键弹不出来时，这四行是唯一的观测口
+        append('\n').append("无障碍（音量键悬浮控制）\n")
+        append("· 设置开关 ").append(if (_accessibilityOn.value) "已开" else "未开")
+            .append(" · 服务连接 ").append(if (VolumeWatcherService.watchConnected) "正常" else "未连接")
+        append("\n· 最近音量键事件 ").append(relativeEventTime(VolumeWatcherService.lastKeyEventAtMs))
+        append("\n· 最近窗口事件 ").append(relativeEventTime(VolumeWatcherService.lastWindowEventAtMs))
+        append("\n· 最近音量面板窗口 ").append(relativeEventTime(VolumeWatcherService.lastPanelSeenAtMs))
+        // 按钮的全过程观测：检测到了但按钮没出现时，这几行直接定位断在哪一环
+        with(VolumeWatcherService) {
+            append("\n· 面板命中 ").append(panelMatchCount).append(" 次 · showButton 调用 ")
+                .append(showButtonCalls).append(" 次")
+            append("\n· 加窗 成功 ").append(addWindowOk).append(" / 失败 ").append(addWindowFail)
+            if (lastAddError.isNotBlank()) append("（最近错误：").append(lastAddError).append("）")
+            append("\n· 按钮当前 ").append(if (buttonShowing) "显示中" else "未显示")
+        }
+        // 荣耀的音量面板窗口标识可能和原生不同，匹配不上时这段快照就是定位依据
+        VolumeWatcherService.windowsDiagSnapshot.takeIf { it.isNotBlank() }?.let { snapshot ->
+            append("\n· 当前窗口列表（包名 | 根类名 | type | layer）\n")
+            snapshot.lineSequence().forEach { line -> append("  ").append(line).append('\n') }
+        }
+    }
+
+    /** 静态时间戳 → 「N 秒前 / 未收到过」。0 表示事件从未发生过。 */
+    private fun relativeEventTime(timeMillis: Long): String {
+        if (timeMillis <= 0L) return "未收到过"
+        val seconds = (System.currentTimeMillis() - timeMillis) / 1000
+        return if (seconds < 1) "刚刚" else "$seconds 秒前"
     }
 
     fun setIncludeSystem(enabled: Boolean) {

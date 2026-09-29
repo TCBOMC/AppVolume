@@ -85,6 +85,7 @@ fun AppListScreen(vm: AppVolumeViewModel) {
     val activePackages by vm.activePackages.collectAsStateWithLifecycle()
     val accessibilityOn by vm.accessibilityOn.collectAsStateWithLifecycle()
     val overlayGranted by vm.overlayGranted.collectAsStateWithLifecycle()
+    val watcherConnected by vm.watcherConnected.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -206,6 +207,28 @@ fun AppListScreen(vm: AppVolumeViewModel) {
                             }
                         }
                     )
+                }
+            }
+
+            if (accessibilityOn && !watcherConnected) {
+                item(key = "watcher_not_connected") {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                            Text("无障碍服务没有连上", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                text = "开关显示已打开，但服务实际没被系统绑定 —— 按音量键不会有任何反应。" +
+                                    "把无障碍里的「音量键悬浮控制」关掉再打开一次；侧载应用若开关被灰掉，" +
+                                    "先去系统「应用信息」里点「允许受限设置」。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
 
