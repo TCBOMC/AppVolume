@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,7 +35,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
@@ -45,7 +42,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -54,6 +50,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -327,22 +324,28 @@ fun AppListScreen(vm: AppVolumeViewModel) {
  * 位置（横竖屏各一份：左右侧 / 距屏幕边缘 0–50dp / 纵向百分比）。
  * 滑条拖动中只更新本地值，松手才写盘 —— 别让一次拖动打出几十次 DataStore 写入。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ButtonSettingsSheet(
     settings: ButtonSettings,
     onUpdate: ((ButtonSettings) -> ButtonSettings) -> Unit,
     onDismiss: () -> Unit
 ) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    FloatingWindow(
+        titleContent = {
+            Icon(
+                Icons.Default.Settings,
+                contentDescription = null,
+                tint = Color(0xEE000000),
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text("设置", color = Color(0xEE000000), style = MaterialTheme.typography.labelLarge)
+        },
+        onDismiss = onDismiss
     ) {
+        // 滚动由 FloatingWindow 的主画布负责，这里只管排版
         Column(
-            // 内容多（横竖屏两组位置共 6 条滑条），纵向空间不够必须可滚动，
-            // 否则超出浮窗高度后底部滑条互相重叠
-            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp).padding(bottom = 24.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text("悬浮按钮设置", style = MaterialTheme.typography.titleMedium)

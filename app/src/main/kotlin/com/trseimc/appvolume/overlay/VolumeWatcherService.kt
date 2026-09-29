@@ -4,9 +4,8 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -485,59 +484,109 @@ class VolumeWatcherService : AccessibilityService() {
             runCatching { windowManager.removeView(it) }
             panelView = null
         }
+        rowsContainer = null
+        panelTitle = null
 
-        val content = LinearLayout(this).apply {
+        val dm = resources.displayMetrics
+        val marginPx = dp(OverlayChrome.MARGIN_DP)
+        val widthPx = minOf(dm.widthPixels - 2 * marginPx, dp(OverlayChrome.MAX_WIDTH_DP))
+        val maxHPx = dm.heightPixels - 2 * marginPx // 高度上限 = 屏幕高 - 上下边距
+
+        // 卡片 = 窗口本身：顶行（信息 + 关闭胶囊，都在卡片内）+ 滚动正文（无标题胶囊）
+        val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply {
-                cornerRadius = dp(18).toFloat()
-                setColor(PANEL_BG)
-            }
-            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = OverlayChrome.roundedBg(
+                this@VolumeWatcherService,
+                0xD9FFFFFF.toInt(),
+                24
+            )
+            setPadding(dp(16), dp(10), dp(16), dp(14))
         }
 
-        val titleRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        val title = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 15f
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        panelTitle = title
-        titleRow.addView(
-            title,
-            LinearLayout.LayoutParams(0, WindowManager.LayoutParams.WRAP_CONTENT, 1f)
+        val info = TextView(this).apply {
+            setTextColor(0x99000000.toInt())
+            textSize = 12f
+            setPadding(dp(2), 0, dp(2), 0)
+        }
+        panelTitle = info
+        topRow.addView(
+            info,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         )
-        titleRow.addView(TextView(this).apply {
-            text = "✕"
-            setTextColor(0xCCFFFFFF.toInt())
-            textSize = 16f
-            setPadding(dp(12), dp(4), 0, dp(4))
-            setOnClickListener { hidePanel() }
-        })
-        content.addView(titleRow)
+        topRow.addView(OverlayChrome.closeCapsule(this, 32) { hidePanel() })
+        card.addView(
+            topRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
 
         val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         rowsContainer = rows
-        content.addView(rows)
-        rebuildRows()
-
-        val scroll = ScrollView(this).apply { addView(content) }
+        val scroll = ScrollView(this).apply { addView(rows) }
+        card.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+        )
 
         val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
+            widthPx,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            // 不做任何变暗：半透明和模糊效果只属于卡片矩形，窗口外内容原样可见
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.CENTER
-            horizontalMargin = 0.06f
+            // Android 12+ 模糊卡片背后；ROM 不支持时退化为纯半透明卡片
+            if (Build.VERSION.SDK_INT >= 31) {
+                runCatching {
+                    flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+                    blurBehindRadius = dp(24)
+                }
+            }
         }
+
+        // 先量自然高度：超出上限就把窗口钉在上限上（正文区开始滚动）
+        card.measure(
+            View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        lp.height = card.measuredHeight.coerceAtMost(maxHPx)
+
+        rebuildRows()
         runCatching {
-            windowManager.addView(scroll, lp)
-            panelView = scroll
+            windowManager.addView(card, lp)
+            panelView = card
         }.onFailure {
             panelView = null
             rowsContainer = null
+            panelTitle = null
         }
+    }
+
+    /** 发声应用集合变化后重算窗口高度：内容变少时收回来，变多时封顶滚动。 */
+    private fun resizePanel() {
+        val root = panelView ?: return
+        val dm = resources.displayMetrics
+        val widthPx = minOf(
+            dm.widthPixels - 2 * dp(OverlayChrome.MARGIN_DP),
+            dp(OverlayChrome.MAX_WIDTH_DP)
+        )
+        root.measure(
+            View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val lp = root.layoutParams as? WindowManager.LayoutParams ?: return
+        lp.height = root.measuredHeight.coerceAtMost(dm.heightPixels - 2 * dp(OverlayChrome.MARGIN_DP))
+        runCatching { windowManager.updateViewLayout(root, lp) }
     }
 
     private fun hidePanel() {
@@ -564,7 +613,7 @@ class VolumeWatcherService : AccessibilityService() {
             if (sessions.isEmpty()) {
                 rows.addView(TextView(this).apply {
                     text = "现在没有应用在发声。播放音乐或视频后再按一次音量键。"
-                    setTextColor(0xAAFFFFFF.toInt())
+                    setTextColor(0x99000000.toInt())
                     textSize = 13f
                     setPadding(0, dp(12), 0, dp(4))
                 })
@@ -573,6 +622,7 @@ class VolumeWatcherService : AccessibilityService() {
             for ((pkg, _) in sessions) {
                 buildAppRow(pkg)?.let { rows.addView(it) }
             }
+            resizePanel()
         }
     }
 
@@ -596,7 +646,7 @@ class VolumeWatcherService : AccessibilityService() {
 
         val name = TextView(this).apply {
             text = label
-            setTextColor(Color.WHITE)
+            setTextColor(0xE6000000.toInt())
             textSize = 14f
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -609,7 +659,7 @@ class VolumeWatcherService : AccessibilityService() {
 
         val dbLabel = TextView(this).apply {
             text = AudioCurve.formatDb(state.gainDb)
-            setTextColor(0xCCFFFFFF.toInt())
+            setTextColor(0x99000000.toInt())
             textSize = 12f
         }
         header.addView(dbLabel)
@@ -767,8 +817,6 @@ class VolumeWatcherService : AccessibilityService() {
         @Volatile
         var lastHideReason = ""
             private set
-
-        private val PANEL_BG = 0xF2202020.toInt()
 
         /** 主界面检查无障碍服务是否已开启。设置里存的是「包/类」或「包/短类名」两种形态。 */
         fun isEnabled(context: Context): Boolean {
