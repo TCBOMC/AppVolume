@@ -30,6 +30,7 @@ import com.trseimc.appvolume.audio.SessionVolumeEngine
 import com.trseimc.appvolume.apps.AppEntry
 import com.trseimc.appvolume.apps.RunState
 import com.trseimc.appvolume.data.ButtonAnimStyle
+import com.trseimc.appvolume.data.ButtonPosition
 import com.trseimc.appvolume.data.ButtonSettings
 import com.trseimc.appvolume.data.ButtonSettingsStore
 import com.trseimc.appvolume.data.ButtonSide
@@ -178,6 +179,16 @@ class VolumeWatcherService : AccessibilityService() {
 
     // 正在播放退场动画的按钮视图；期间再次显示时先收掉它，避免叠两个窗口
     private var pendingOut: View? = null
+
+    // 按钮本次显示所用位置（横竖屏各有一份配置）；显示期间旋转屏幕时，
+    // 退场动画仍按显示时的方向和边距回退，避免方向错乱
+    private var shownPosition = ButtonPosition()
+
+    /** 当前屏幕方向对应的位置配置。 */
+    private fun currentPosition(): ButtonPosition {
+        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        return if (landscape) buttonSettings.landscape else buttonSettings.portrait
+    }
 
     // 当前同步跟随的音量面板窗口 id：命中时记下，消失判定只认「这个窗口从列表里移除」
     @Volatile
@@ -369,6 +380,8 @@ class VolumeWatcherService : AccessibilityService() {
 
         if (buttonView == null) {
             val s = buttonSettings
+            val pos = currentPosition()
+            shownPosition = pos
             val view = VolumeButtonView(this, s.sizeDp, resources.displayMetrics.density).apply {
                 setOnClickListener { showPanel() }
             }
@@ -383,19 +396,19 @@ class VolumeWatcherService : AccessibilityService() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                // 音量条一般贴着按键一侧垂直居中，按钮放同侧；纵向位置按设置的百分比
-                gravity = (if (s.side == ButtonSide.RIGHT) Gravity.END else Gravity.START) or
+                // 音量条一般贴着按键一侧垂直居中，按钮放同侧；横竖屏位置各按各的配置
+                gravity = (if (pos.side == ButtonSide.RIGHT) Gravity.END else Gravity.START) or
                     Gravity.CENTER_VERTICAL
-                x = dp(12)
-                y = ((s.verticalPercent - 50) / 100f * resources.displayMetrics.heightPixels).toInt()
+                x = dp(pos.edgeMarginDp)
+                y = ((pos.verticalPercent - 50) / 100f * resources.displayMetrics.heightPixels).toInt()
             }
             runCatching {
                 windowManager.addView(view, lp)
                 buttonView = view
                 buttonShowing = true
                 addWindowOk++
-                playEnterAnimation(view, s)
-                Log.i(TAG, "showButton: 悬浮按钮已显示（viaPanel=$viaPanel）")
+                playEnterAnimation(view, s, pos)
+                Log.i(TAG, "showButton: 悬浮按钮已显示（viaPanel=$viaPanel, pos=${pos.side}/${pos.edgeMarginDp}dp/${pos.verticalPercent}%）")
             }.onFailure {
                 addWindowFail++
                 lastAddError = it.message ?: it.javaClass.simpleName
@@ -413,12 +426,13 @@ class VolumeWatcherService : AccessibilityService() {
         }
     }
 
-    private fun playEnterAnimation(view: View, s: ButtonSettings) {
+    private fun playEnterAnimation(view: View, s: ButtonSettings, pos: ButtonPosition) {
+        if (s.animDurationMs <= 0) return // 0 = 不动画，直接出现在落点
         when (s.animStyle) {
             ButtonAnimStyle.SLIDE -> {
-                val direction = if (s.side == ButtonSide.RIGHT) 1f else -1f
+                val direction = if (pos.side == ButtonSide.RIGHT) 1f else -1f
                 // 出发点在屏幕外（视图宽 + 边距），平移到落点
-                view.translationX = direction * (dp(s.sizeDp) + dp(12))
+                view.translationX = direction * (dp(s.sizeDp) + dp(pos.edgeMarginDp))
                 view.animate().translationX(0f).setDuration(s.animDurationMs.toLong()).start()
             }
             ButtonAnimStyle.FADE -> {
@@ -434,12 +448,13 @@ class VolumeWatcherService : AccessibilityService() {
             buttonView = null
             buttonShowing = false
             val s = buttonSettings
+            val pos = shownPosition
             if (animate && s.animDurationMs > 0) {
                 pendingOut = view
                 val animator = when (s.animStyle) {
                     ButtonAnimStyle.SLIDE -> {
-                        val direction = if (s.side == ButtonSide.RIGHT) 1f else -1f
-                        view.animate().translationX(direction * (dp(s.sizeDp) + dp(12)))
+                        val direction = if (pos.side == ButtonSide.RIGHT) 1f else -1f
+                        view.animate().translationX(direction * (dp(s.sizeDp) + dp(pos.edgeMarginDp)))
                     }
                     ButtonAnimStyle.FADE -> view.animate().alpha(0f)
                 }

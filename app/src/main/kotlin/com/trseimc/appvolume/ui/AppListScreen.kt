@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -63,6 +65,7 @@ import com.trseimc.appvolume.apps.AppEntry
 import com.trseimc.appvolume.audio.AppVolumeState
 import com.trseimc.appvolume.audio.AudioCurve
 import com.trseimc.appvolume.data.ButtonAnimStyle
+import com.trseimc.appvolume.data.ButtonPosition
 import com.trseimc.appvolume.data.ButtonSettings
 import com.trseimc.appvolume.data.ButtonSide
 import com.trseimc.appvolume.audio.ShizukuBridge
@@ -320,7 +323,8 @@ fun AppListScreen(vm: AppVolumeViewModel) {
 }
 
 /**
- * 悬浮按钮设置浮窗：消失时间、动画样式、动画时长、位置、大小。
+ * 悬浮按钮设置浮窗：大小（24–96dp）、消失时间、动画样式、动画时长（0–500ms，0=不动画）、
+ * 位置（横竖屏各一份：左右侧 / 距屏幕边缘 0–50dp / 纵向百分比）。
  * 滑条拖动中只更新本地值，松手才写盘 —— 别让一次拖动打出几十次 DataStore 写入。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -335,7 +339,10 @@ private fun ButtonSettingsSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp),
+            // 内容多（横竖屏两组位置共 6 条滑条），纵向空间不够必须可滚动，
+            // 否则超出浮窗高度后底部滑条互相重叠
+            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             Text("悬浮按钮设置", style = MaterialTheme.typography.titleMedium)
@@ -345,8 +352,9 @@ private fun ButtonSettingsSheet(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            SettingLabel("消失时间", "${"%.1f".format(settings.hideTimeoutMs / 1000f)} 秒")
             var timeout by remember(settings.hideTimeoutMs) { mutableStateOf(settings.hideTimeoutMs.toFloat()) }
+            // 标签读草稿值：拖动时数字实时跟着走，松手才写盘
+            SettingLabel("消失时间", "${"%.1f".format(timeout / 1000f)} 秒")
             Slider(
                 value = timeout,
                 onValueChange = { timeout = it },
@@ -370,53 +378,88 @@ private fun ButtonSettingsSheet(
                 )
             }
 
-            SettingLabel("动画时长", "${settings.animDurationMs} ms")
             var animMs by remember(settings.animDurationMs) { mutableStateOf(settings.animDurationMs.toFloat()) }
+            SettingLabel(
+                "动画时长",
+                if (animMs.roundToInt() == 0) "0 ms（不动画）" else "${animMs.roundToInt()} ms"
+            )
             Slider(
                 value = animMs,
                 onValueChange = { animMs = it },
                 onValueChangeFinished = {
-                    onUpdate { s -> s.copy(animDurationMs = ((animMs / 50).roundToInt().coerceIn(2, 12)) * 50) }
+                    onUpdate { s -> s.copy(animDurationMs = animMs.roundToInt().coerceIn(0, 500)) }
                 },
-                valueRange = 100f..600f
+                valueRange = 0f..500f,
+                steps = 499
             )
 
-            SettingLabel("位置")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = settings.side == ButtonSide.LEFT,
-                    onClick = { onUpdate { it.copy(side = ButtonSide.LEFT) } },
-                    label = { Text("左侧") }
-                )
-                FilterChip(
-                    selected = settings.side == ButtonSide.RIGHT,
-                    onClick = { onUpdate { it.copy(side = ButtonSide.RIGHT) } },
-                    label = { Text("右侧") }
-                )
-            }
-            SettingLabel("纵向位置", "${settings.verticalPercent}%（0 顶 / 100 底）")
-            var vertical by remember(settings.verticalPercent) { mutableStateOf(settings.verticalPercent.toFloat()) }
-            Slider(
-                value = vertical,
-                onValueChange = { vertical = it },
-                onValueChangeFinished = {
-                    onUpdate { s -> s.copy(verticalPercent = (vertical / 5).roundToInt().coerceIn(2, 18) * 5) }
-                },
-                valueRange = 10f..90f
+            // 位置横竖屏各存一份：音量条在两种方向下弹出位置不同
+            SettingLabel("位置（竖屏）")
+            PositionEditor(
+                pos = settings.portrait,
+                onUpdate = { p -> onUpdate { it.copy(portrait = p) } }
+            )
+            SettingLabel("位置（横屏）")
+            PositionEditor(
+                pos = settings.landscape,
+                onUpdate = { p -> onUpdate { it.copy(landscape = p) } }
             )
 
-            SettingLabel("大小", "${settings.sizeDp} dp")
             var size by remember(settings.sizeDp) { mutableStateOf(settings.sizeDp.toFloat()) }
+            SettingLabel("大小", "${size.roundToInt()} dp")
             Slider(
                 value = size,
                 onValueChange = { size = it },
                 onValueChangeFinished = {
-                    onUpdate { s -> s.copy(sizeDp = (size / 4).roundToInt().coerceIn(12, 32) * 4) }
+                    onUpdate { s -> s.copy(sizeDp = (size / 2).roundToInt().coerceIn(12, 48) * 2) }
                 },
-                valueRange = 48f..128f
+                valueRange = 24f..96f,
+                steps = 35
             )
         }
     }
+}
+
+/** 一个屏幕方向的位置编辑：左右侧 + 距屏幕边缘（0–50 dp，1 刻度）+ 纵向百分比（1% 刻度）。 */
+@Composable
+private fun PositionEditor(
+    pos: ButtonPosition,
+    onUpdate: (ButtonPosition) -> Unit
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = pos.side == ButtonSide.LEFT,
+            onClick = { onUpdate(pos.copy(side = ButtonSide.LEFT)) },
+            label = { Text("左侧") }
+        )
+        FilterChip(
+            selected = pos.side == ButtonSide.RIGHT,
+            onClick = { onUpdate(pos.copy(side = ButtonSide.RIGHT)) },
+            label = { Text("右侧") }
+        )
+    }
+    var edge by remember(pos.edgeMarginDp) { mutableStateOf(pos.edgeMarginDp.toFloat()) }
+    SettingLabel("距屏幕边缘", "${edge.roundToInt()} dp")
+    Slider(
+        value = edge,
+        onValueChange = { edge = it },
+        onValueChangeFinished = {
+            onUpdate(pos.copy(edgeMarginDp = edge.roundToInt().coerceIn(0, 50)))
+        },
+        valueRange = 0f..50f,
+        steps = 49
+    )
+    var vertical by remember(pos.verticalPercent) { mutableStateOf(pos.verticalPercent.toFloat()) }
+    SettingLabel("纵向位置", "${vertical.roundToInt()}%（0 顶 / 100 底）")
+    Slider(
+        value = vertical,
+        onValueChange = { vertical = it },
+        onValueChangeFinished = {
+            onUpdate(pos.copy(verticalPercent = vertical.roundToInt().coerceIn(10, 90)))
+        },
+        valueRange = 10f..90f,
+        steps = 79
+    )
 }
 
 @Composable
