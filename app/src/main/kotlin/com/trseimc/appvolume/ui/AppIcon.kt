@@ -14,7 +14,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 
 @Composable
-fun AppIcon(packageName: String, size: Dp = 44.dp) {
+fun AppIcon(packageName: String, size: Dp = 44.dp, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val bitmap: Bitmap? = remember(packageName) {
         try {
@@ -27,9 +27,9 @@ fun AppIcon(packageName: String, size: Dp = 44.dp) {
         Image(
             bitmap = bitmap.asImageBitmap(),
             contentDescription = null,
-            modifier = Modifier.size(size)
+            modifier = modifier.size(size)
         )
     } else {
-        Spacer(modifier = Modifier.size(size))
+        Spacer(modifier = modifier.size(size))
     }
 }

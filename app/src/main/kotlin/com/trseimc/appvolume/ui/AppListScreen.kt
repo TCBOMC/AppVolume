@@ -6,7 +6,11 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.widget.Toast
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -51,6 +56,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -274,11 +281,29 @@ fun AppListScreen(vm: AppVolumeViewModel) {
 
                 if (playing.isNotEmpty()) {
                     item(key = "h_playing") { SectionHeader("正在发声 · 可以立即调节", playing.size) }
-                    items(playing, key = { it.packageName }) { AppRow(it, volumes[it.packageName] ?: AppVolumeState.DEFAULT, minDb) { selectedApp = it } }
+                    items(playing, key = { it.packageName }) { AppRow(
+                        it,
+                        volumes[it.packageName] ?: AppVolumeState.DEFAULT,
+                        minDb,
+                        onVolumeChange = { value, final ->
+                            val st = (volumes[it.packageName] ?: AppVolumeState.DEFAULT)
+                                .copy(gainSlider = value)
+                            if (final) vm.pushToEngine(it, st) else vm.pushLive(it, st)
+                        }
+                    ) { selectedApp = it } }
                 }
                 if (running.isNotEmpty()) {
                     item(key = "h_running") { SectionHeader("正在运行", running.size) }
-                    items(running, key = { it.packageName }) { AppRow(it, volumes[it.packageName] ?: AppVolumeState.DEFAULT, minDb) { selectedApp = it } }
+                    items(running, key = { it.packageName }) { AppRow(
+                        it,
+                        volumes[it.packageName] ?: AppVolumeState.DEFAULT,
+                        minDb,
+                        onVolumeChange = { value, final ->
+                            val st = (volumes[it.packageName] ?: AppVolumeState.DEFAULT)
+                                .copy(gainSlider = value)
+                            if (final) vm.pushToEngine(it, st) else vm.pushLive(it, st)
+                        }
+                    ) { selectedApp = it } }
                 }
                 if (recent.isNotEmpty()) {
                     item(key = "h_recent") {
@@ -291,7 +316,16 @@ fun AppListScreen(vm: AppVolumeViewModel) {
                             }
                         )
                     }
-                    items(recent, key = { it.packageName }) { AppRow(it, volumes[it.packageName] ?: AppVolumeState.DEFAULT, minDb) { selectedApp = it } }
+                    items(recent, key = { it.packageName }) { AppRow(
+                        it,
+                        volumes[it.packageName] ?: AppVolumeState.DEFAULT,
+                        minDb,
+                        onVolumeChange = { value, final ->
+                            val st = (volumes[it.packageName] ?: AppVolumeState.DEFAULT)
+                                .copy(gainSlider = value)
+                            if (final) vm.pushToEngine(it, st) else vm.pushLive(it, st)
+                        }
+                    ) { selectedApp = it } }
                 }
             }
 
@@ -818,80 +852,120 @@ private fun copyToClipboard(context: Context, text: String) {
     Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AppRow(app: AppEntry, state: AppVolumeState, minDb: Float, onClick: () -> Unit) {
-    Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth()
+private fun AppRow(
+    app: AppEntry,
+    state: AppVolumeState,
+    minDb: Float,
+    onVolumeChange: (value: Float, final: Boolean) -> Unit,
+    onClick: () -> Unit
+) {
+    // 拖动期间显示本地草稿值：保存值要等落盘去抖后才会回流，直接读会跳动
+    var dragging by remember { mutableStateOf(false) }
+    var draft by remember { mutableStateOf(state.gainSlider) }
+    LaunchedEffect(state.gainSlider) {
+        if (!dragging) draft = state.gainSlider
+    }
+
+    // 圆角矩形，圆角大小与胶囊浮窗里的胶囊一致（胶囊高 40dp，实际圆角 = 20dp），
+    // 带 4dp 阴影 + 白底细边框
+    val shape = RoundedCornerShape(20.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .shadow(elevation = 4.dp, shape = shape, clip = false)
+            .clip(shape)
+            .background(Color(0xF2FFFFFF))
+            .border(1.dp, Color(0x1F000000), shape)
+            .clickable(onClick = onClick)
+            .padding(12.dp)
     ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            AppIcon(packageName = app.packageName, size = 44.dp)
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = app.label,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    if (app.isPlayingAudio) {
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Icon(
-                            imageVector = Icons.Default.GraphicEq,
-                            contentDescription = "正在播放音频",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
+        Column {
+            // 顶部横置主音量条：快捷调整，样式与音量面板一致（横置、图标在左侧）
+            HorizontalVolumeSlider(
+                value = draft,
+                packageName = app.packageName,
+                onValueChange = { value ->
+                    dragging = true
+                    draft = value
+                    onVolumeChange(value, false)
+                },
+                onDragStart = { dragging = true },
+                onDragEnd = {
+                    dragging = false
+                    onVolumeChange(draft, true)
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 应用图标已在音量条内左侧，这里不再重复放
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = app.label,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
+                        if (app.isPlayingAudio) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Icon(
+                                imageVector = Icons.Default.GraphicEq,
+                                contentDescription = "正在播放音频",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
-                }
-                Text(
-                    text = app.packageName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    AssistChip(
-                        onClick = {},
-                        label = { Text(app.runState.text, style = MaterialTheme.typography.labelSmall) }
+                    Text(
+                        text = app.packageName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-                    if (app.isSystemApp) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         AssistChip(
                             onClick = {},
-                            label = { Text("系统", style = MaterialTheme.typography.labelSmall) }
+                            label = { Text(app.runState.text, style = MaterialTheme.typography.labelSmall) }
+                        )
+                        if (app.isSystemApp) {
+                            AssistChip(
+                                onClick = {},
+                                label = { Text("系统", style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                        Text(
+                            text = when {
+                                app.isPlayingAudio -> "正在发声"
+                                app.isRunning -> "运行中"
+                                else -> formatRelativeTime(app.lastUsedMillis)
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.align(Alignment.CenterVertically)
                         )
                     }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = when {
-                            app.isPlayingAudio -> "正在发声"
-                            app.isRunning -> "运行中"
-                            else -> formatRelativeTime(app.lastUsedMillis)
-                        },
+                        text = AudioCurve.formatDb(AudioCurve.sliderToGainDb(draft, minDb)),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = AudioCurve.formatPan(state.pan),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.align(Alignment.CenterVertically)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    text = AudioCurve.formatDb(AudioCurve.sliderToGainDb(state.gainSlider, minDb)),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Text(
-                    text = AudioCurve.formatPan(state.pan),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
         }
     }
