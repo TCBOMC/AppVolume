@@ -5,7 +5,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -545,13 +544,6 @@ class VolumeWatcherService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.CENTER
-            // Android 12+ 模糊卡片背后；ROM 不支持时退化为纯半透明卡片
-            if (Build.VERSION.SDK_INT >= 31) {
-                runCatching {
-                    flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-                    blurBehindRadius = dp(24)
-                }
-            }
         }
 
         // 先量自然高度：超出上限就把窗口钉在上限上（正文区开始滚动）

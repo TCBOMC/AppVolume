@@ -1,7 +1,9 @@
 package com.trseimc.appvolume.ui
 
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.PixelFormat
-import android.os.Build
+import android.app.Activity
 import android.view.MotionEvent
 import android.view.WindowManager
 import androidx.compose.foundation.background
@@ -9,7 +11,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -34,13 +35,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 
 /** 卡片与屏幕边缘的最小间距，上下=左右。 */
 private val WindowMargin = 20.dp
@@ -121,20 +124,13 @@ fun FloatingWindow(
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
-        val blurRadiusPx = with(LocalDensity.current) { 24.dp.toPx().toInt() }
         LaunchedEffect(dialogWindow, onDismiss) {
             dialogWindow?.apply {
                 setFormat(PixelFormat.TRANSLUCENT)
-                // 关键：不做任何全屏变暗。dim=0 且去掉 DIM 标志，窗口外零效果
+                // 不做任何全屏变暗。dim=0 且去掉 DIM 标志，窗口外零效果
                 clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
                 setDimAmount(0f)
                 addFlags(WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH)
-                if (Build.VERSION.SDK_INT >= 31) {
-                    runCatching {
-                        addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
-                        attributes = attributes.apply { blurBehindRadius = blurRadiusPx }
-                    }
-                }
                 decorView.setOnTouchListener { _, event ->
                     if (event.action == MotionEvent.ACTION_OUTSIDE) {
                         onDismiss()
@@ -146,57 +142,79 @@ fun FloatingWindow(
             }
         }
 
-        // 卡片尺寸上限直接取 Dialog 实际拿到的约束（BoxWithConstraints 的 max 即
-        // window 可用帧），减去上下/左右边距 —— 不用 screenHeightDp 估算：那套数字
-        // 和 window 可用帧对不上时，上限比可用高还大，卡片会撑到贴满屏幕，
-        // 上下边距消失、模糊区域也跟着盖住大半屏
-        BoxWithConstraints(contentAlignment = Alignment.Center) {
-            val maxCardWidth = if (maxWidth != Dp.Infinity) {
-                minOf(WindowMaxWidth.value, (maxWidth - WindowMargin * 2).value).dp
-            } else {
-                WindowMaxWidth
-            }
-            val maxCardHeight = if (maxHeight != Dp.Infinity) maxHeight - WindowMargin * 2 else maxHeight
+        // 高度不依赖 Dialog 约束（真机证明那个方向拿到的可能是无界约束，
+        // 200dp 测试已验证 configuration 估算链路有效），直接用 configuration 估算，
+        // 上下边距与左右一致。
+        // 关键一：targetSdk 35 强制 edge-to-edge 后 screenHeightDp 是整块屏幕的高度
+        // （含状态栏/导航栏区域），且 Dialog 窗口能落位到 y=0，必须再减掉系统栏 +
+        // 刘海的安全区高度，否则上下边距会被系统栏吃掉（真机实证）。
+        // 关键二：安全区不能从 Dialog 自己的 WindowInsets 读——Dialog 是 floating
+        // window，窗口帧不含系统栏区域，下发给它的 insets 全是 0（真机实证"没区别"）。
+        // 必须读 Activity 窗口（edge-to-edge）decorView 的 rootWindowInsets
+        val configuration = LocalConfiguration.current
+        val density = LocalDensity.current
+        val activity = LocalContext.current.findActivity()
+        val safeInsets = activity?.window?.decorView
+            ?.let { ViewCompat.getRootWindowInsets(it) }
+            ?.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+        val safeTopDp = with(density) { (safeInsets?.top ?: 0).toDp() }
+        val safeBottomDp = with(density) { (safeInsets?.bottom ?: 0).toDp() }
+        val maxCardWidth = minOf(
+            WindowMaxWidth.value,
+            (configuration.screenWidthDp - WindowMargin.value * 2).coerceAtLeast(0f)
+        ).dp
+        val maxCardHeight = (
+            configuration.screenHeightDp - WindowMargin.value * 2 -
+                safeTopDp.value - safeBottomDp.value
+            ).coerceAtLeast(0f).dp
 
-            MaterialTheme(colorScheme = lightColorScheme()) {
+        MaterialTheme(colorScheme = lightColorScheme()) {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = maxCardWidth)
+                    .heightIn(max = maxCardHeight)
+                    .clip(WindowCardShape)
+                    .background(WindowCardBg)
+                    .border(1.dp, WindowCardBorder, WindowCardShape)
+            ) {
+                // 顶行：左上角标题胶囊（可选）+ 右上角关闭胶囊，都在卡片内部
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 12.dp, top = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (titleContent != null) {
+                        WindowCapsule {
+                            titleContent()
+                        }
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                    WindowCapsule(onClick = onDismiss) {
+                        Text("✕", color = Color(0xE6000000))
+                    }
+                }
+
+                // 滚动主画布：正文放这里；fill=false 内容不满时按内容高，超上限才滚动
                 Column(
                     modifier = Modifier
-                        .widthIn(max = maxCardWidth)
-                        .heightIn(max = maxCardHeight)
-                        .clip(WindowCardShape)
-                        .background(WindowCardBg)
-                        .border(1.dp, WindowCardBorder, WindowCardShape)
+                        .fillMaxWidth()
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState())
+                        .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp)
                 ) {
-                    // 顶行：左上角标题胶囊（可选）+ 右上角关闭胶囊，都在卡片内部
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 12.dp, end = 12.dp, top = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (titleContent != null) {
-                            WindowCapsule {
-                                titleContent()
-                            }
-                        }
-                        Spacer(modifier = Modifier.weight(1f))
-                        WindowCapsule(onClick = onDismiss) {
-                            Text("✕", color = Color(0xE6000000))
-                        }
-                    }
-
-                    // 滚动主画布：正文放这里；fill=false 内容不满时按内容高，超上限才滚动
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f, fill = false)
-                            .verticalScroll(rememberScrollState())
-                            .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp)
-                    ) {
-                        content()
-                    }
+                    content()
                 }
             }
         }
     }
+}
+
+/** 沿 ContextWrapper.base 链找到宿主 Activity（Dialog 的 context 是主题包装层）。 */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext?.findActivity()
+    else -> null
 }
