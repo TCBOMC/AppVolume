@@ -11,8 +11,10 @@ import com.trseimc.appvolume.apps.ProcessScanner
 import com.trseimc.appvolume.overlay.VolumeWatcherService
 import com.trseimc.appvolume.apps.RunState
 import com.trseimc.appvolume.audio.AppVolumeState
+import com.trseimc.appvolume.audio.AudioCurve
 import com.trseimc.appvolume.audio.ApplyResult
 import com.trseimc.appvolume.audio.EngineCapability
+import com.trseimc.appvolume.audio.MasterVolume
 import com.trseimc.appvolume.audio.SessionEffectEngine
 import com.trseimc.appvolume.audio.SessionRegistry
 import com.trseimc.appvolume.audio.SessionScanner
@@ -21,6 +23,8 @@ import com.trseimc.appvolume.audio.ShizukuBridge
 import com.trseimc.appvolume.data.ButtonSettings
 import com.trseimc.appvolume.data.ButtonSettingsStore
 import com.trseimc.appvolume.data.VolumeRepository
+import com.trseimc.appvolume.data.VolumeSettings
+import com.trseimc.appvolume.data.VolumeSettingsStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -121,8 +125,26 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
     val buttonSettings: StateFlow<ButtonSettings> = buttonStore.settings
         .stateIn(viewModelScope, SharingStarted.Eagerly, ButtonSettings())
 
+    // 音量调节全局设置（量程 / 额外衰减），设置浮窗「音量设置」组读写
+    private val volumeSettingsStore = VolumeSettingsStore(application)
+    val volumeSettings: StateFlow<VolumeSettings> = volumeSettingsStore.settings
+        .stateIn(viewModelScope, SharingStarted.Eagerly, VolumeSettings())
+
+    // 系统主音量比例（0..1）。应用增益的有效调节范围 = -(量程 × 这个值) - 额外衰减，
+    // 主音量变了范围跟着变，UI 的 dB 标签据此重算
+    private val _masterFraction = MutableStateFlow(1f)
+    val masterFraction: StateFlow<Float> = _masterFraction
+
+    // 有效衰减底端（已含量程与额外衰减设置）。设置变更和主音量轮询都会刷新
+    private val _minDb = MutableStateFlow(-AudioCurve.FULL_RANGE_DB)
+    val minDb: StateFlow<Float> = _minDb
+
     fun updateButtonSettings(transform: (ButtonSettings) -> ButtonSettings) {
         viewModelScope.launch { buttonStore.update(transform) }
+    }
+
+    fun updateVolumeSettings(transform: (VolumeSettings) -> VolumeSettings) {
+        viewModelScope.launch { volumeSettingsStore.update(transform) }
     }
 
     /** 进程表是靠借 Shizuku 的 shell 身份读到的（本进程权限被 ROM 拒了）。 */
@@ -151,6 +173,22 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
     private val pendingSaves = HashMap<String, Job>()
 
     init {
+        // 主音量轮询：1s 一次。AudioManager 读数极轻，比引擎下发便宜几个数量级。
+        // 同时刷新 MasterVolume 全局缓存（服务的推送路径读它算衰减底端）
+        viewModelScope.launch(Dispatchers.Default) {
+            while (true) {
+                _masterFraction.value = MasterVolume.refresh(app)
+                _minDb.value = MasterVolume.minDb(_masterFraction.value)
+                delay(MASTER_POLL_MS)
+            }
+        }
+        // 量程/额外衰减设置变了：写进 MasterVolume 缓存并立刻重算底端
+        viewModelScope.launch(Dispatchers.Default) {
+            volumeSettings.collect {
+                MasterVolume.applySettings(it.fullRangeDb, it.extraDb)
+                _minDb.value = MasterVolume.minDb(_masterFraction.value)
+            }
+        }
         // 后台服务在扫会话，这里负责把结果反映到列表上
         viewModelScope.launch {
             SessionRegistry.sessions.collect { sessions ->
@@ -476,6 +514,9 @@ class AppVolumeViewModel(application: Application) : AndroidViewModel(applicatio
     private companion object {
         // 使用记录的回溯窗口，只用来标注「最后使用时间」和前台/后台
         const val USAGE_WINDOW_MS = 6 * 60 * 60 * 1000L
+
+        // 主音量轮询间隔：应用增益范围随系统主音量收缩
+        const val MASTER_POLL_MS = 1000L
 
         // 「最近打开」一段的窗口：这么近还开着，大概率只是被切到后台、进程没死
         const val RECENT_WINDOW_MS = 30 * 60 * 1000L

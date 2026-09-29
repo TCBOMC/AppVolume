@@ -66,6 +66,7 @@ import com.trseimc.appvolume.data.ButtonAnimStyle
 import com.trseimc.appvolume.data.ButtonPosition
 import com.trseimc.appvolume.data.ButtonSettings
 import com.trseimc.appvolume.data.ButtonSide
+import com.trseimc.appvolume.data.VolumeSettings
 import com.trseimc.appvolume.audio.ShizukuBridge
 import com.trseimc.appvolume.util.FileLog
 import kotlinx.coroutines.delay
@@ -98,6 +99,8 @@ fun AppListScreen(vm: AppVolumeViewModel) {
     val overlayGranted by vm.overlayGranted.collectAsStateWithLifecycle()
     val watcherConnected by vm.watcherConnected.collectAsStateWithLifecycle()
     val buttonSettings by vm.buttonSettings.collectAsStateWithLifecycle()
+    val volumeSettings by vm.volumeSettings.collectAsStateWithLifecycle()
+    val minDb by vm.minDb.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -271,11 +274,11 @@ fun AppListScreen(vm: AppVolumeViewModel) {
 
                 if (playing.isNotEmpty()) {
                     item(key = "h_playing") { SectionHeader("正在发声 · 可以立即调节", playing.size) }
-                    items(playing, key = { it.packageName }) { AppRow(it, volumes[it.packageName] ?: AppVolumeState.DEFAULT) { selectedApp = it } }
+                    items(playing, key = { it.packageName }) { AppRow(it, volumes[it.packageName] ?: AppVolumeState.DEFAULT, minDb) { selectedApp = it } }
                 }
                 if (running.isNotEmpty()) {
                     item(key = "h_running") { SectionHeader("正在运行", running.size) }
-                    items(running, key = { it.packageName }) { AppRow(it, volumes[it.packageName] ?: AppVolumeState.DEFAULT) { selectedApp = it } }
+                    items(running, key = { it.packageName }) { AppRow(it, volumes[it.packageName] ?: AppVolumeState.DEFAULT, minDb) { selectedApp = it } }
                 }
                 if (recent.isNotEmpty()) {
                     item(key = "h_recent") {
@@ -288,7 +291,7 @@ fun AppListScreen(vm: AppVolumeViewModel) {
                             }
                         )
                     }
-                    items(recent, key = { it.packageName }) { AppRow(it, volumes[it.packageName] ?: AppVolumeState.DEFAULT) { selectedApp = it } }
+                    items(recent, key = { it.packageName }) { AppRow(it, volumes[it.packageName] ?: AppVolumeState.DEFAULT, minDb) { selectedApp = it } }
                 }
             }
 
@@ -315,7 +318,9 @@ fun AppListScreen(vm: AppVolumeViewModel) {
     if (showSettings) {
         ButtonSettingsSheet(
             settings = buttonSettings,
+            volumeSettings = volumeSettings,
             onUpdate = vm::updateButtonSettings,
+            onUpdateVolume = vm::updateVolumeSettings,
             onDismiss = { showSettings = false }
         )
     }
@@ -329,7 +334,9 @@ fun AppListScreen(vm: AppVolumeViewModel) {
 @Composable
 private fun ButtonSettingsSheet(
     settings: ButtonSettings,
+    volumeSettings: VolumeSettings,
     onUpdate: ((ButtonSettings) -> ButtonSettings) -> Unit,
+    onUpdateVolume: ((VolumeSettings) -> VolumeSettings) -> Unit,
     onDismiss: () -> Unit
 ) {
     FloatingWindow(
@@ -420,6 +427,44 @@ private fun ButtonSettingsSheet(
                 },
                 valueRange = 24f..96f,
                 steps = 35
+            )
+
+            // 音量设置组：衰减范围 = -(量程 × 系统主音量) - 额外衰减
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("音量设置", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "应用增益衰减范围 = -(量程 × 系统主音量) - 额外衰减。" +
+                    "例：量程 80、额外 2、主音量 10% → 范围 -10 ~ 0 dB。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            var rangeDb by remember(volumeSettings.fullRangeDb) {
+                mutableStateOf(volumeSettings.fullRangeDb.toFloat())
+            }
+            SettingLabel("量程（主音量 100% 时）", "${rangeDb.roundToInt()} dB")
+            Slider(
+                value = rangeDb,
+                onValueChange = { rangeDb = it },
+                onValueChangeFinished = {
+                    onUpdateVolume { s -> s.copy(fullRangeDb = rangeDb.roundToInt().coerceIn(20, 120)) }
+                },
+                valueRange = 20f..120f,
+                steps = 99
+            )
+
+            var extraDb by remember(volumeSettings.extraDb) {
+                mutableStateOf(volumeSettings.extraDb.toFloat())
+            }
+            SettingLabel("额外衰减", "${extraDb.roundToInt()} dB")
+            Slider(
+                value = extraDb,
+                onValueChange = { extraDb = it },
+                onValueChangeFinished = {
+                    onUpdateVolume { s -> s.copy(extraDb = extraDb.roundToInt().coerceIn(0, 20)) }
+                },
+                valueRange = 0f..20f,
+                steps = 19
             )
 
             // 日志记录（排查闪退用）：运行日志写入文件，闪退堆栈无条件落盘；
@@ -775,7 +820,7 @@ private fun copyToClipboard(context: Context, text: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AppRow(app: AppEntry, state: AppVolumeState, onClick: () -> Unit) {
+private fun AppRow(app: AppEntry, state: AppVolumeState, minDb: Float, onClick: () -> Unit) {
     Card(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth()
@@ -839,7 +884,7 @@ private fun AppRow(app: AppEntry, state: AppVolumeState, onClick: () -> Unit) {
             Spacer(modifier = Modifier.width(8.dp))
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    text = AudioCurve.formatDb(state.gainDb),
+                    text = AudioCurve.formatDb(AudioCurve.sliderToGainDb(state.gainSlider, minDb)),
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(

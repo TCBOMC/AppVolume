@@ -14,6 +14,7 @@ import android.os.Looper
 import android.util.Log
 import com.trseimc.appvolume.R
 import com.trseimc.appvolume.data.VolumeRepository
+import com.trseimc.appvolume.data.VolumeSettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -59,6 +60,12 @@ class AudioControlService : Service() {
             .onFailure { Log.w(TAG, "startForeground 失败，退化为后台服务", it) }
 
         scope.launch { repository.all.collect { settings = it } }
+        // 量程/额外衰减设置：写进 MasterVolume 缓存，引擎下发路径的底端跟着变
+        scope.launch {
+            VolumeSettingsStore(this@AudioControlService).settings.collect {
+                MasterVolume.applySettings(it.fullRangeDb, it.extraDb)
+            }
+        }
         scope.launch {
             while (currentCoroutineContext().isActive) {
                 rescan()
@@ -91,6 +98,9 @@ class AudioControlService : Service() {
             scanner.scan()
         }
         SessionRegistry.publish(result.sessions, result.source, result.error, result.rawSection)
+        // 每个轮询周期刷新主音量缓存：用户按音量键改了系统音量，应用增益
+        // 的有效调节范围（-60×主音量）要跟着变
+        MasterVolume.refresh(this)
         SessionEffectEngine.sync(result.sessions, settings)
     }
 

@@ -35,6 +35,7 @@ import com.trseimc.appvolume.apps.AppEntry
 import com.trseimc.appvolume.audio.AppVolumeState
 import com.trseimc.appvolume.audio.AudioCurve
 import com.trseimc.appvolume.audio.EngineCapability
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlin.math.roundToInt
 
 @Composable
@@ -57,7 +58,10 @@ fun VolumeSheet(
     }
 
     val stereo = draft.stereo
-    val gainDb = draft.gainDb
+    // 衰减范围跟系统主音量与音量设置走：标签读 minDb 流，任一变化立刻重算
+    val masterFraction by vm.masterFraction.collectAsStateWithLifecycle()
+    val minDb by vm.minDb.collectAsStateWithLifecycle()
+    val gainDb = AudioCurve.sliderToGainDb(draft.gainSlider, minDb)
 
     FloatingWindow(
         titleContent = {
@@ -114,6 +118,12 @@ fun VolumeSheet(
 
             // 主音量
             SectionTitle("主音量")
+            Text(
+                text = "范围 ${AudioCurve.formatDb(minDb)} ~ 0 dB" +
+                    "（系统主音量 ${(masterFraction * 100).roundToInt()}%）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,

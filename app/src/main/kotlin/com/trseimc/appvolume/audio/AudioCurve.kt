@@ -16,7 +16,7 @@ import java.util.Locale
  *    振幅每减半（-6dB）听起来是「明显变小」，但从 100% 线性滑到 50% 只等于 -6dB，
  *    而滑条后半段 50%→0% 的行程却要覆盖剩下 -6dB 到 -∞，听感上会变成「前半段几乎没变化，
  *    后半段突然掉光」。所以让滑条行程等分 dB，听感才均匀。
- *    范围取 [-60dB, 0dB]：0dB 为原始音量（不放大，避免削波），-60dB 以下人耳基本听不到。
+ *    范围默认 [-80dB, 0dB]：0dB 为原始音量（不放大，避免削波），底端随主音量与设置收缩（见 [MasterVolume]）。
  *
  * 2) 左右平衡走「等功率声像律」（equal-power pan law）。
  *    若用线性交叉衰减（左 = 1-p，右 = p），中间位置两个声道各 0.5，
@@ -25,8 +25,13 @@ import java.util.Locale
  */
 object AudioCurve {
 
-    // 推子底端（dB）。低于此值视为听不见。
-    const val MIN_DB = -60f
+    // 推子底端（dB）的默认值。低于此值视为听不见。这是主音量 100%、无额外
+    // 衰减时的默认底端；实际底端按主音量比例与设置收缩，见 [MasterVolume.minDb]
+    const val MIN_DB = -80f
+
+    // 默认全量程的绝对值（80），动态底端 = -(FULL_RANGE_DB × 主音量比例) - 额外衰减。
+    // 量程可在设置浮窗的「音量设置」组调整（20–120），这里只是初始默认值
+    const val FULL_RANGE_DB = 80f
 
     // 推子顶端（dB）。0dB = 原始音量，不做正向增益以免数字削波。
     const val MAX_DB = 0f
@@ -37,19 +42,20 @@ object AudioCurve {
     /**
      * 滑条位置 → 增益 dB。
      * @param slider 0f（静音）..1f（原始音量）
+     * @param minDb 推子底端；主音量不满时范围收缩（如主音量 75% 传 -45）
      * @return dB 值，可能是 [Float.NEGATIVE_INFINITY] 表示完全静音
      */
-    fun sliderToGainDb(slider: Float): Float {
+    fun sliderToGainDb(slider: Float, minDb: Float = MIN_DB): Float {
         val s = slider.coerceIn(0f, 1f)
         if (s <= MUTE_ZONE) return Float.NEGATIVE_INFINITY
         val t = (s - MUTE_ZONE) / (1f - MUTE_ZONE)
-        return MIN_DB + t * (MAX_DB - MIN_DB)
+        return minDb + t * (MAX_DB - minDb)
     }
 
     /** dB → 滑条位置，[sliderToGainDb] 的逆变换，用于回显已保存的配置。 */
-    fun gainDbToSlider(db: Float): Float {
-        if (db.isInfinite() || db <= MIN_DB) return 0f
-        val t = (db.coerceIn(MIN_DB, MAX_DB) - MIN_DB) / (MAX_DB - MIN_DB)
+    fun gainDbToSlider(db: Float, minDb: Float = MIN_DB): Float {
+        if (db.isInfinite() || db <= minDb) return 0f
+        val t = (db.coerceIn(minDb, MAX_DB) - minDb) / (MAX_DB - minDb)
         return MUTE_ZONE + t * (1f - MUTE_ZONE)
     }
 

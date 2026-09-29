@@ -27,6 +27,7 @@ import androidx.viewpager2.widget.ViewPager2
 import com.trseimc.appvolume.MainActivity
 import com.trseimc.appvolume.audio.AppVolumeState
 import com.trseimc.appvolume.audio.AudioCurve
+import com.trseimc.appvolume.audio.MasterVolume
 import com.trseimc.appvolume.audio.SessionEffectEngine
 import com.trseimc.appvolume.audio.SessionRegistry
 import com.trseimc.appvolume.audio.SessionVolumeEngine
@@ -38,6 +39,7 @@ import com.trseimc.appvolume.data.ButtonSettings
 import com.trseimc.appvolume.data.ButtonSettingsStore
 import com.trseimc.appvolume.data.ButtonSide
 import com.trseimc.appvolume.data.VolumeRepository
+import com.trseimc.appvolume.data.VolumeSettingsStore
 import com.trseimc.appvolume.util.FileLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -174,6 +176,7 @@ class VolumeWatcherService : AccessibilityService() {
 
     // 按钮设置：DataStore 流在服务连接时收集进这个快照，showButton/hideButton 直接读
     private val buttonStore by lazy { ButtonSettingsStore(this) }
+    private val volumeSettingsStore by lazy { VolumeSettingsStore(this) }
 
     @Volatile
     private var buttonSettings = ButtonSettings()
@@ -217,6 +220,12 @@ class VolumeWatcherService : AccessibilityService() {
             repository.all.collect { all ->
                 configs.clear()
                 configs.putAll(all)
+            }
+        }
+        // 量程/额外衰减设置：写进 MasterVolume 缓存，面板滑条的 dB 读数跟着变
+        serviceScope.launch {
+            volumeSettingsStore.settings.collect {
+                MasterVolume.applySettings(it.fullRangeDb, it.extraDb)
             }
         }
         serviceScope.launch {
@@ -857,6 +866,8 @@ class VolumeWatcherService : AccessibilityService() {
             runState = RunState.BACKGROUND,
             isSystemApp = false
         )
+        // 推送前刷新主音量缓存：面板滑条的衰减范围跟系统主音量走
+        MasterVolume.refresh(this)
         engine.applyVolume(entry, push.state)
 
         if (push.final) {
